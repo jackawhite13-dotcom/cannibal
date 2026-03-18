@@ -96,6 +96,8 @@ export default function Home() {
   // Fetch event names when GA4 property changes
   useEffect(() => {
     if (!selectedGa4Property) return
+    setGa4EventNames([])
+    setSelectedEvent('')
     fetch('/api/ga4/event-names', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -103,10 +105,14 @@ export default function Home() {
     })
       .then(r => r.json())
       .then(data => {
+        if (data.error) {
+          setGa4Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error))
+          return
+        }
         setGa4EventNames(data.eventNames || [])
         setSelectedEvent(data.eventNames?.[0] || '')
       })
-      .catch(() => {})
+      .catch(e => setGa4Error(e.message))
   }, [selectedGa4Property])
 
   const groupedByKeyword = rows.reduce((acc, row) => {
