@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { auth } from '@/auth'
 
+export const maxDuration = 60
+
 const GSC_URL = 'https://searchconsole.googleapis.com/webmasters/v3/sites'
 
-async function gscFetch(siteUrl: string, token: string, body: object, timeoutMs = 45000) {
+async function gscFetch(siteUrl: string, token: string, body: object, timeoutMs = 30000) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -21,30 +23,44 @@ async function gscFetch(siteUrl: string, token: string, body: object, timeoutMs 
   }
 }
 
+const COUNTRY_CODES: Record<string, string> = {
+  US: 'usa', UK: 'gbr', CA: 'can', AU: 'aus', DE: 'deu', FR: 'fra', IN: 'ind',
+}
+
 export async function POST(req: NextRequest) {
   const session = await auth()
   if (!session?.access_token) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
   }
 
-  const { siteUrl } = await req.json()
+  const { siteUrl, dateRange = 180, country = '' } = await req.json()
   if (!siteUrl) {
     return NextResponse.json({ error: 'siteUrl required' }, { status: 400 })
   }
 
   const endDate = new Date().toISOString().split('T')[0]
-  const startDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-  const totalDays = 180
+  const startDate = new Date(Date.now() - dateRange * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+  const totalDays = dateRange
 
-  // Call 1: aggregated query+page → avg position + clicks
+  const dimensionFilterGroups = country && COUNTRY_CODES[country] ? [{
+    filters: [{ dimension: 'country', operator: 'equals', expression: COUNTRY_CODES[country] }]
+  }] : []
+
+  const baseQuery = {
+    startDate, endDate,
+    searchType: 'web',
+    rowLimit: 25000,
+    startRow: 0,
+    dataState: 'final',
+    ...(dimensionFilterGroups.length > 0 ? { dimensionFilterGroups } : {}),
+  }
+
+  // Call 1: query+page → avg position + clicks
   let res1
   try {
     res1 = await gscFetch(siteUrl, session.access_token, {
-      startDate, endDate,
+      ...baseQuery,
       dimensions: ['query', 'page'],
-      rowLimit: 25000,
-      startRow: 0,
-      dataState: 'final',
     })
   } catch (e: unknown) {
     return NextResponse.json({ error: `GSC request failed: ${e instanceof Error ? e.message : 'timeout'}` }, { status: 500 })
@@ -57,50 +73,33 @@ export async function POST(req: NextRequest) {
   const data1 = await res1.json()
   const aggRows: { keys: string[]; clicks: number; position: number }[] = data1.rows || []
 
-  // Build aggregated map: "keyword||url" -> { position, clicks }
   const aggMap: Record<string, { position: number; clicks: number }> = {}
   for (const row of aggRows) {
     const key = `${row.keys[0]}||${row.keys[1]}`
     aggMap[key] = { position: Math.round(row.position * 10) / 10, clicks: row.clicks }
   }
 
-  // Call 2: query+page+date → count distinct days ranked per keyword+url (paginated)
+  // Call 2: query+page+date → days ranked (single call, best effort)
   let daysMap: Record<string, number> = {}
   try {
-    const dateSetMap: Record<string, Set<string>> = {}
-    let startRow = 0
-    const pageSize = 25000
-    const maxPages = 10 // up to 250k rows
+    const res2 = await gscFetch(siteUrl, session.access_token, {
+      ...baseQuery,
+      dimensions: ['query', 'page', 'date'],
+    }, 20000)
 
-    for (let page = 0; page < maxPages; page++) {
-      const res2 = await gscFetch(siteUrl, session.access_token, {
-        startDate, endDate,
-        dimensions: ['query', 'page', 'date'],
-        rowLimit: pageSize,
-        startRow,
-        dataState: 'final',
-      }, 45000)
-
-      if (!res2.ok) break
+    if (res2.ok) {
       const data2 = await res2.json()
-      const dateRows: { keys: string[] }[] = data2.rows || []
-      if (dateRows.length === 0) break
-
-      for (const row of dateRows) {
+      const dateSetMap: Record<string, Set<string>> = {}
+      for (const row of (data2.rows || []) as { keys: string[] }[]) {
         const key = `${row.keys[0]}||${row.keys[1]}`
         if (!dateSetMap[key]) dateSetMap[key] = new Set()
         dateSetMap[key].add(row.keys[2])
       }
-
-      if (dateRows.length < pageSize) break
-      startRow += pageSize
-    }
-
-    for (const [key, dates] of Object.entries(dateSetMap)) {
-      daysMap[key] = dates.size
+      for (const [key, dates] of Object.entries(dateSetMap)) {
+        daysMap[key] = dates.size
+      }
     }
   } catch {
-    // Days data is optional — don't fail the whole request
     daysMap = {}
   }
 

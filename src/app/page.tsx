@@ -5,7 +5,9 @@ import { useSession, signIn, signOut } from 'next-auth/react'
 import { AuditRow, Recommendation, TopPageRow, GscSite } from '@/types/audit'
 import { buildAuditRowsFromGsc, syncRecommendation } from '@/lib/buildAuditRows'
 import { parseTopPagesCsv } from '@/lib/parseTopPages'
-import { Upload, Download, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw } from 'lucide-react'
+import { Upload, Download, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, ChevronRight } from 'lucide-react'
+
+type WizardStep = 1 | 2 | 3 | 4
 
 const RECOMMENDATIONS: Recommendation[] = [
   '', '301 Redirect', 'De-optimize', 'Consolidate', 'Protect', 'Monitor', 'No Action',
@@ -35,25 +37,39 @@ const positionColor = (pos: number) => {
   return 'text-red-400'
 }
 
-interface Ga4Property {
-  propertyId: string
-  displayName: string
-}
+interface Ga4Property { propertyId: string; displayName: string }
+
+const DATE_RANGES = [
+  { label: '30 days', value: 30 },
+  { label: '90 days', value: 90 },
+  { label: '6 months', value: 180 },
+]
+
+const COUNTRIES = [
+  { label: 'All countries', value: '' },
+  { label: 'United States', value: 'US' },
+  { label: 'United Kingdom', value: 'UK' },
+  { label: 'Canada', value: 'CA' },
+  { label: 'Australia', value: 'AU' },
+  { label: 'Germany', value: 'DE' },
+  { label: 'France', value: 'FR' },
+  { label: 'India', value: 'IN' },
+]
 
 export default function Home() {
   const { data: session, status } = useSession()
+  const [wizardStep, setWizardStep] = useState<WizardStep>(1)
+
+  // Step 1 — GSC
   const [sites, setSites] = useState<GscSite[]>([])
   const [selectedSite, setSelectedSite] = useState('')
+  const [dateRange, setDateRange] = useState(180)
+  const [country, setCountry] = useState('')
   const [rows, setRows] = useState<AuditRow[]>([])
-  const [topPages, setTopPages] = useState<Record<string, TopPageRow>>({})
   const [isLoading, setIsLoading] = useState(false)
-  const [loadingMsg, setLoadingMsg] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const [csvUploaded, setCsvUploaded] = useState(false)
-  const [csvDebug, setCsvDebug] = useState('')
-  const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // GA4
+  // Step 2 — GA4
   const [ga4Properties, setGa4Properties] = useState<Ga4Property[]>([])
   const [selectedGa4Property, setSelectedGa4Property] = useState('')
   const [ga4EventNames, setGa4EventNames] = useState<string[]>([])
@@ -63,37 +79,44 @@ export default function Home() {
   const [ga4PropertiesLoading, setGa4PropertiesLoading] = useState(false)
   const [ga4Error, setGa4Error] = useState<string | null>(null)
 
-  // Fetch GSC sites + GA4 properties once authenticated
+  // Step 3 — Ahrefs
+  const [topPages, setTopPages] = useState<Record<string, TopPageRow>>({})
+  const [csvUploaded, setCsvUploaded] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Load GSC sites on auth
   useEffect(() => {
     if (session?.access_token) {
       fetch('/api/gsc/sites')
         .then(r => r.json())
         .then(data => {
-          const siteList: GscSite[] = data.siteEntry || []
-          setSites(siteList)
-          if (siteList.length > 0) setSelectedSite(siteList[0].siteUrl)
+          const list: GscSite[] = data.siteEntry || []
+          setSites(list)
+          if (list.length > 0) setSelectedSite(list[0].siteUrl)
         })
         .catch(() => {})
+    }
+  }, [session])
 
+  // Load GA4 properties when reaching step 2
+  useEffect(() => {
+    if (wizardStep === 2 && session?.access_token && ga4Properties.length === 0 && !ga4PropertiesLoading && !ga4Error) {
       setGa4PropertiesLoading(true)
       fetch('/api/ga4/properties')
         .then(r => r.json())
         .then(data => {
-          if (data.error) {
-            setGa4Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error))
-            return
-          }
+          if (data.error) { setGa4Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error)); return }
           const props: Ga4Property[] = data.properties || []
           setGa4Properties(props)
           if (props.length > 0) setSelectedGa4Property(props[0].propertyId)
-          else setGa4Error('No GA4 properties found for this Google account')
+          else setGa4Error('No GA4 properties found for this account')
         })
         .catch(e => setGa4Error(e.message))
         .finally(() => setGa4PropertiesLoading(false))
     }
-  }, [session])
+  }, [wizardStep, session])
 
-  // Fetch event names when GA4 property changes
+  // Load GA4 event names when property changes
   useEffect(() => {
     if (!selectedGa4Property) return
     setGa4EventNames([])
@@ -105,10 +128,7 @@ export default function Home() {
     })
       .then(r => r.json())
       .then(data => {
-        if (data.error) {
-          setGa4Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error))
-          return
-        }
+        if (data.error) { setGa4Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error)); return }
         setGa4EventNames(data.eventNames || [])
         setSelectedEvent(data.eventNames?.[0] || '')
       })
@@ -126,23 +146,51 @@ export default function Home() {
     setIsLoading(true)
     setError(null)
     setRows([])
-    setLoadingMsg('Fetching Search Console data (this may take a moment)...')
-
     try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 90000)
       const res = await fetch('/api/gsc/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ siteUrl: selectedSite }),
+        body: JSON.stringify({ siteUrl: selectedSite, dateRange, country }),
+        signal: controller.signal,
       })
+      clearTimeout(timer)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed to fetch GSC data')
-      const built = buildAuditRowsFromGsc(data.keywords || [], topPages)
+      const built = buildAuditRowsFromGsc(data.keywords || [], topPages, data.totalDays)
       setRows(built)
-      setLoadingMsg('')
+      setWizardStep(2)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  async function handleAddEvents() {
+    if (!selectedGa4Property || !selectedEvent) return
+    setGa4Loading(true)
+    try {
+      const res = await fetch('/api/ga4/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ propertyId: selectedGa4Property, eventName: selectedEvent }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error))
+      const pathMap: Record<string, number> = data.pathMap || {}
+      setActiveEvent(selectedEvent)
+      setRows(prev => prev.map(row => {
+        const path = row.url.replace(/^https?:\/\/[^/]+/, '').replace(/\/$/, '') || '/'
+        const count = pathMap[path] ?? null
+        return { ...row, keyEvents: count !== null ? { ...(row.keyEvents || {}), [selectedEvent]: count } : row.keyEvents }
+      }))
+      setWizardStep(3)
+    } catch (e: unknown) {
+      setGa4Error(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      setGa4Loading(false)
     }
   }
 
@@ -152,10 +200,9 @@ export default function Home() {
     const reader = new FileReader()
     reader.onload = (ev) => {
       const text = ev.target?.result as string
-      const { map: parsed, debug } = parseTopPagesCsv(text)
+      const { map: parsed } = parseTopPagesCsv(text)
       setTopPages(parsed)
       setCsvUploaded(true)
-      setCsvDebug(debug)
       if (rows.length > 0) {
         setRows(prev => prev.map(row => {
           const tp = parsed[row.url.replace(/\/$/, '')]
@@ -176,45 +223,20 @@ export default function Home() {
     ))
   }
 
-  async function handleAddEvents() {
-    if (!selectedGa4Property || !selectedEvent) return
-    setGa4Loading(true)
-    setGa4Error(null)
-    try {
-      const res = await fetch('/api/ga4/events', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ propertyId: selectedGa4Property, eventName: selectedEvent }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to fetch GA4 data')
-      const pathMap: Record<string, number> = data.pathMap || {}
-      setActiveEvent(selectedEvent)
-      setRows(prev => prev.map(row => {
-        const path = row.url.replace(/^https?:\/\/[^/]+/, '').replace(/\/$/, '') || '/'
-        const count = pathMap[path] ?? null
-        return {
-          ...row,
-          keyEvents: count !== null ? { ...(row.keyEvents || {}), [selectedEvent]: count } : row.keyEvents,
-        }
-      }))
-    } catch (e: unknown) {
-      setGa4Error(e instanceof Error ? e.message : 'Unknown error')
-    } finally {
-      setGa4Loading(false)
-    }
-  }
-
   function handleExportCsv() {
     const eventHeader = activeEvent ? `Event: ${activeEvent}` : 'Key Events'
-    const headers = ['Keyword', 'URL', 'Position', 'Days Ranked', 'Clicks (6mo)', 'Avg Monthly Clicks', 'Cannibalization Count', 'Referring Domains', 'Total Keywords', eventHeader, 'Notes', 'Recommendation']
+    const headers = ['Keyword', 'URL', 'Position', 'Days Ranked', 'Cannibalization Count',
+      ...(csvUploaded ? ['Referring Domains', 'Total Keywords'] : []),
+      'Clicks 6mo', 'Avg Monthly Clicks',
+      ...(activeEvent ? [eventHeader] : []),
+      'Notes', 'Recommendation']
     const csvRows = rows.map(r => [
       r.keyword, r.url, r.position,
       r.daysRanked !== null ? `${r.daysRanked}/${r.totalDays}` : '',
-      r.clicks6m ?? '', r.avgMonthlyClicks ?? '',
       r.cannibalizationCount,
-      r.referringDomains ?? '', r.totalKeywords ?? '',
-      activeEvent && r.keyEvents?.[activeEvent] !== undefined ? r.keyEvents[activeEvent] : '',
+      ...(csvUploaded ? [r.referringDomains ?? '', r.totalKeywords ?? ''] : []),
+      r.clicks6m ?? '', r.avgMonthlyClicks ?? '',
+      ...(activeEvent ? [r.keyEvents?.[activeEvent] !== undefined ? r.keyEvents[activeEvent] : ''] : []),
       r.notes, r.recommendation,
     ])
     const csv = [headers, ...csvRows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
@@ -228,6 +250,20 @@ export default function Home() {
 
   const uniqueKeywordCount = Object.keys(groupedByKeyword).length
   const uniqueUrlCount = new Set(rows.map(r => r.url)).size
+
+  const stepDone = (s: WizardStep) => {
+    if (s === 1) return rows.length > 0
+    if (s === 2) return !!activeEvent
+    if (s === 3) return csvUploaded
+    return false
+  }
+
+  const stepLabel = (s: WizardStep) => {
+    if (s === 1) return 'Search Console'
+    if (s === 2) return 'GA4 Key Events'
+    if (s === 3) return 'Ahrefs Data'
+    return 'Audit'
+  }
 
   return (
     <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
@@ -245,204 +281,261 @@ export default function Home() {
             </div>
           </div>
         </div>
+
+        {/* Step nav */}
         <nav className="flex-1 p-3 space-y-1">
-          <div className="px-3 py-2 rounded-lg text-sm font-semibold border-l-2 border-[#232323]"
-            style={{ background: 'rgba(248,214,185,0.6)', color: 'var(--color-text)' }}>
-            Audit Builder
-          </div>
+          {([1, 2, 3] as WizardStep[]).map(s => (
+            <button
+              key={s}
+              onClick={() => (s === 1 || rows.length > 0) ? setWizardStep(s) : null}
+              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${wizardStep === s ? 'font-semibold border-l-2 border-[#232323]' : 'hover:opacity-70'}`}
+              style={{ background: wizardStep === s ? 'rgba(248,214,185,0.6)' : 'transparent', color: 'var(--color-text)' }}
+            >
+              <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] flex-shrink-0 ${stepDone(s) ? 'bg-[#232323] text-white' : 'border border-current opacity-50'}`}>
+                {stepDone(s) ? <Check className="w-3 h-3" /> : s}
+              </span>
+              <span className="flex-1">{stepLabel(s)}</span>
+              {s !== 1 && <span className="text-[9px] opacity-40 uppercase tracking-wide">opt</span>}
+            </button>
+          ))}
+          {rows.length > 0 && (
+            <button
+              onClick={() => setWizardStep(4)}
+              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${wizardStep === 4 ? 'font-semibold border-l-2 border-[#232323]' : 'hover:opacity-70'}`}
+              style={{ background: wizardStep === 4 ? 'rgba(248,214,185,0.6)' : 'transparent', color: 'var(--color-text)' }}
+            >
+              <span className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] flex-shrink-0 border border-current opacity-50">4</span>
+              <span>Audit</span>
+            </button>
+          )}
         </nav>
-        {/* Auth status */}
+
         <div className="p-4 border-t" style={{ borderColor: 'var(--color-sidebar-hover)' }}>
           {status === 'authenticated' ? (
             <div>
-              <div className="text-xs font-medium truncate mb-2" style={{ color: 'var(--color-text)' }}>
-                {session.user?.email}
-              </div>
-              <button
-                onClick={() => signOut()}
-                className="flex items-center gap-1.5 text-xs w-full transition-opacity hover:opacity-70"
-                style={{ color: 'var(--color-text-muted)' }}
-              >
+              <div className="text-xs font-medium truncate mb-2" style={{ color: 'var(--color-text)' }}>{session.user?.email}</div>
+              <button onClick={() => signOut()} className="flex items-center gap-1.5 text-xs hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>
                 <LogOut className="w-3 h-3" /> Sign out
               </button>
             </div>
           ) : (
-            <div className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-              Keyword Cannibalization Audit
-            </div>
+            <div className="text-xs" style={{ color: 'var(--color-text-muted)' }}>Keyword Cannibalization Audit</div>
           )}
         </div>
       </div>
 
       {/* Main */}
       <div className="flex-1 overflow-x-hidden flex flex-col">
-        {/* Top bar */}
         <div className="px-8 py-5 flex items-center justify-between border-b" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
           <div>
             <h1 className="text-xl font-semibold" style={{ color: 'var(--color-text)' }}>Cannibal Audit Builder</h1>
-            <p className="text-sm mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
-              Identify and resolve keyword cannibalization across any domain
-            </p>
+            <p className="text-sm mt-0.5" style={{ color: 'var(--color-text-muted)' }}>Identify and resolve keyword cannibalization across any domain</p>
           </div>
-          {rows.length > 0 && (
-            <button onClick={handleExportCsv}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors hover:opacity-80"
-              style={{ background: '#232323', color: '#fff' }}>
+          {rows.length > 0 && wizardStep === 4 && (
+            <button onClick={handleExportCsv} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
               <Download className="w-4 h-4" /> Export CSV
             </button>
           )}
         </div>
 
-        <div className="px-8 py-6 space-y-6">
-          {/* Auth / Data Sources card */}
-          <div className="card">
-            <h2 className="text-xs font-semibold uppercase tracking-wide mb-4" style={{ color: 'var(--color-text-muted)' }}>Data Sources</h2>
+        <div className="px-8 py-6 space-y-4 max-w-3xl">
 
-            {status !== 'authenticated' ? (
-              <div className="flex items-center gap-4">
-                <div>
-                  <p className="text-sm font-medium mb-1" style={{ color: 'var(--color-text)' }}>Connect Google Search Console</p>
-                  <p className="text-xs mb-3" style={{ color: 'var(--color-text-muted)' }}>Required to pull keyword + URL cannibalization data</p>
-                  <button
-                    onClick={() => signIn('google')}
-                    disabled={status === 'loading'}
-                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors hover:opacity-80 disabled:opacity-50"
-                    style={{ background: '#232323', color: '#fff' }}
-                  >
-                    <LogIn className="w-4 h-4" />
-                    Connect Google Account
-                  </button>
-                </div>
+          {/* Not signed in */}
+          {status !== 'authenticated' && (
+            <div className="card">
+              <p className="text-sm font-medium mb-1" style={{ color: 'var(--color-text)' }}>Connect your Google account to get started</p>
+              <p className="text-xs mb-4" style={{ color: 'var(--color-text-muted)' }}>Required for Google Search Console and GA4 access</p>
+              <button onClick={() => signIn('google')} disabled={status === 'loading'} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50" style={{ background: '#232323', color: '#fff' }}>
+                <LogIn className="w-4 h-4" /> Connect Google Account
+              </button>
+            </div>
+          )}
+
+          {/* ── STEP 1: GSC ── */}
+          {status === 'authenticated' && wizardStep === 1 && (
+            <div className="card">
+              <div className="flex items-center gap-2 mb-5">
+                <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center text-xs font-bold">1</span>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Search Console</h2>
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: '#232323', color: '#fff' }}>Required</span>
               </div>
-            ) : (
-              <>
-              <div className="flex items-end gap-4 flex-wrap">
-                {/* Site selector */}
-                <div className="flex-1 min-w-64">
-                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>
-                    GSC Property
-                  </label>
-                  <div className="flex gap-2">
-                    <div className="relative flex-1">
-                      <select
-                        value={selectedSite}
-                        onChange={e => setSelectedSite(e.target.value)}
-                        className="w-full appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8"
-                        style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                      >
-                        {sites.map(s => (
-                          <option key={s.siteUrl} value={s.siteUrl}>{s.siteUrl}</option>
-                        ))}
-                        {sites.length === 0 && <option value="">No properties found</option>}
-                      </select>
-                      <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
-                    </div>
-                    <button
-                      onClick={handlePull}
-                      disabled={isLoading || !selectedSite}
-                      className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      style={{ background: '#232323', color: '#fff' }}
-                    >
-                      <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-                      {isLoading ? 'Pulling...' : 'Pull Data'}
-                    </button>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>GSC Property</label>
+                  <div className="relative max-w-sm">
+                    <select value={selectedSite} onChange={e => setSelectedSite(e.target.value)} className="w-full appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
+                      {sites.map(s => <option key={s.siteUrl} value={s.siteUrl}>{s.siteUrl}</option>)}
+                      {sites.length === 0 && <option>No properties found</option>}
+                    </select>
+                    <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
                   </div>
                 </div>
 
-                {/* Top Pages CSV */}
                 <div>
-                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>
-                    Ahrefs Top Pages CSV <span className="normal-case font-normal">(ref domains + keywords)</span>
-                  </label>
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors"
-                    style={csvUploaded
-                      ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' }
-                      : { background: 'var(--color-surface-elevated)', borderColor: 'rgba(248,214,185,0.5)', color: 'var(--color-text)' }}
-                  >
-                    <Upload className="w-4 h-4" />
-                    {csvUploaded ? 'CSV Loaded ✓' : 'Upload CSV'}
-                  </button>
-                  <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={handleCsvUpload} />
-                  {csvDebug && <p className="text-[10px] mt-1" style={{ color: 'var(--color-text-muted)' }}>{csvDebug}</p>}
-                </div>
-
-                {/* GA4 Key Events — always visible */}
-                <div className="flex items-end gap-2 flex-wrap">
-                  {ga4PropertiesLoading ? (
-                    <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                      <RefreshCw className="w-3 h-3 animate-spin" /> Loading GA4 properties...
-                    </div>
-                  ) : ga4Error ? (
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-red-600">{ga4Error}</span>
-                      <button
-                        onClick={() => { setGa4Error(null); setGa4Properties([]); setGa4PropertiesLoading(true); fetch('/api/ga4/properties').then(r => r.json()).then(data => { const props = data.properties || []; setGa4Properties(props); if (props.length > 0) setSelectedGa4Property(props[0].propertyId); else setGa4Error('No GA4 properties found'); }).catch(e => setGa4Error(e.message)).finally(() => setGa4PropertiesLoading(false)) }}
-                        className="text-xs underline" style={{ color: 'var(--color-text-muted)' }}
-                      >Retry</button>
-                    </div>
-                  ) : ga4Properties.length > 0 ? (
-                    <>
-                      <div>
-                        <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>GA4 Property</label>
-                        <div className="relative">
-                          <select
-                            value={selectedGa4Property}
-                            onChange={e => setSelectedGa4Property(e.target.value)}
-                            className="appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8 max-w-[200px]"
-                            style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                          >
-                            {ga4Properties.map(p => (
-                              <option key={p.propertyId} value={p.propertyId}>{p.displayName}</option>
-                            ))}
-                          </select>
-                          <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Key Event</label>
-                        <div className="relative">
-                          <select
-                            value={selectedEvent}
-                            onChange={e => setSelectedEvent(e.target.value)}
-                            className="appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8 max-w-[200px]"
-                            style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                          >
-                            {ga4EventNames.map(e => (<option key={e} value={e}>{e}</option>))}
-                            {ga4EventNames.length === 0 && <option value="">Loading events...</option>}
-                          </select>
-                          <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
-                        </div>
-                      </div>
-                      <button
-                        onClick={handleAddEvents}
-                        disabled={ga4Loading || !selectedEvent || rows.length === 0}
-                        className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        style={activeEvent === selectedEvent
-                          ? { background: '#B7EBFF', borderColor: '#7dd3fc', color: '#0369a1' }
-                          : { background: 'var(--color-surface-elevated)', borderColor: 'rgba(183,235,255,0.6)', color: 'var(--color-text)' }}
-                      >
-                        <RefreshCw className={`w-4 h-4 ${ga4Loading ? 'animate-spin' : ''}`} />
-                        {ga4Loading ? 'Loading...' : activeEvent === selectedEvent ? 'Events Added ✓' : 'Add Events'}
+                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Date Range</label>
+                  <div className="flex gap-2">
+                    {DATE_RANGES.map(d => (
+                      <button key={d.value} onClick={() => setDateRange(d.value)} className="px-4 py-2 text-sm rounded-lg border transition-colors" style={dateRange === d.value ? { background: '#232323', color: '#fff', borderColor: '#232323' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+                        {d.label}
                       </button>
-                    </>
-                  ) : null}
+                    ))}
+                  </div>
                 </div>
-              </div>
-              </>
-            )}
 
-            {error && (
-              <div className="mt-4 px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">
-                {error}
-              </div>
-            )}
-          </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Country</label>
+                  <div className="relative max-w-[220px]">
+                    <select value={country} onChange={e => setCountry(e.target.value)} className="w-full appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
+                      {COUNTRIES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+                    </select>
+                    <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
+                  </div>
+                </div>
 
-          {/* Stats */}
-          {rows.length > 0 && (
-            <div className="grid grid-cols-3 gap-3">
+                <button onClick={handlePull} disabled={isLoading || !selectedSite} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
+                  <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+                  {isLoading ? 'Pulling data...' : 'Pull Data'}
+                </button>
+
+                {error && <div className="px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{error}</div>}
+              </div>
+            </div>
+          )}
+
+          {/* Step 1 summary (shown on steps 2/3/4) */}
+          {status === 'authenticated' && rows.length > 0 && wizardStep > 1 && (
+            <button onClick={() => setWizardStep(1)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
+              <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center flex-shrink-0"><Check className="w-3 h-3" /></span>
+              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 1 — Search Console</span>
+              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{selectedSite} · {rows.length.toLocaleString()} rows</span>
+              <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
+            </button>
+          )}
+
+          {/* ── STEP 2: GA4 ── */}
+          {status === 'authenticated' && wizardStep === 2 && (
+            <div className="card">
+              <div className="flex items-center gap-2 mb-5">
+                <span className="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold" style={{ borderColor: '#232323', color: '#232323' }}>2</span>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>GA4 Key Events</h2>
+                <span className="text-[10px] px-2 py-0.5 rounded-full border font-medium" style={{ borderColor: 'var(--color-border-strong)', color: 'var(--color-text-muted)' }}>Optional</span>
+              </div>
+
+              {ga4PropertiesLoading ? (
+                <div className="flex items-center gap-2 text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
+                  <RefreshCw className="w-4 h-4 animate-spin" /> Loading GA4 properties...
+                </div>
+              ) : ga4Error ? (
+                <div className="mb-4 px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{ga4Error}</div>
+              ) : ga4Properties.length > 0 ? (
+                <div className="space-y-4">
+                  <div className="flex gap-3 flex-wrap">
+                    <div>
+                      <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>GA4 Property</label>
+                      <div className="relative">
+                        <select value={selectedGa4Property} onChange={e => setSelectedGa4Property(e.target.value)} className="appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8 max-w-[240px]" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
+                          {ga4Properties.map(p => <option key={p.propertyId} value={p.propertyId}>{p.displayName}</option>)}
+                        </select>
+                        <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Key Event</label>
+                      <div className="relative">
+                        <select value={selectedEvent} onChange={e => setSelectedEvent(e.target.value)} className="appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8 max-w-[240px]" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
+                          {ga4EventNames.map(e => <option key={e} value={e}>{e}</option>)}
+                          {ga4EventNames.length === 0 && <option>Loading events...</option>}
+                        </select>
+                        <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
+                      </div>
+                    </div>
+                  </div>
+                  <button onClick={handleAddEvents} disabled={ga4Loading || !selectedEvent} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
+                    <RefreshCw className={`w-4 h-4 ${ga4Loading ? 'animate-spin' : ''}`} />
+                    {ga4Loading ? 'Loading events...' : 'Add Events'}
+                  </button>
+                </div>
+              ) : null}
+
+              <div className="mt-5 pt-4 border-t flex items-center justify-between" style={{ borderColor: 'var(--color-border)' }}>
+                <button onClick={() => setWizardStep(3)} className="text-sm hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>
+                  Skip this step →
+                </button>
+                {activeEvent && (
+                  <button onClick={() => setWizardStep(3)} className="flex items-center gap-1 text-sm font-medium" style={{ color: '#232323' }}>
+                    Next: Ahrefs Data <ChevronRight className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Step 2 summary */}
+          {status === 'authenticated' && rows.length > 0 && wizardStep > 2 && (
+            <button onClick={() => setWizardStep(2)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
+              <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: activeEvent ? '#232323' : 'var(--color-border-strong)', color: activeEvent ? '#fff' : 'var(--color-text)' }}>
+                {activeEvent ? <Check className="w-3 h-3" /> : <span className="text-xs">2</span>}
+              </span>
+              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 2 — GA4 Key Events</span>
+              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{activeEvent || 'Skipped'}</span>
+              <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
+            </button>
+          )}
+
+          {/* ── STEP 3: Ahrefs ── */}
+          {status === 'authenticated' && wizardStep === 3 && (
+            <div className="card">
+              <div className="flex items-center gap-2 mb-5">
+                <span className="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold" style={{ borderColor: '#232323', color: '#232323' }}>3</span>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Ahrefs Data</h2>
+                <span className="text-[10px] px-2 py-0.5 rounded-full border font-medium" style={{ borderColor: 'var(--color-border-strong)', color: 'var(--color-text-muted)' }}>Optional</span>
+              </div>
+
+              <p className="text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
+                Upload an Ahrefs Top Pages CSV to add Referring Domains and Total Keywords to each URL.
+                <br /><span className="text-xs mt-1 block">In Ahrefs: Site Explorer → Top Pages → Export CSV</span>
+              </p>
+
+              <div className="flex items-center gap-3">
+                <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium border transition-colors" style={csvUploaded ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+                  <Upload className="w-4 h-4" />
+                  {csvUploaded ? 'CSV Loaded ✓' : 'Upload Ahrefs CSV'}
+                </button>
+                <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={handleCsvUpload} />
+                {csvUploaded && (
+                  <button onClick={() => setWizardStep(4)} className="flex items-center gap-1 text-sm font-medium" style={{ color: '#232323' }}>
+                    View Audit <ChevronRight className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              <div className="mt-5 pt-4 border-t" style={{ borderColor: 'var(--color-border)' }}>
+                <button onClick={() => setWizardStep(4)} className="text-sm hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>
+                  Skip this step →
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Step 3 summary */}
+          {status === 'authenticated' && rows.length > 0 && wizardStep === 4 && (
+            <button onClick={() => setWizardStep(3)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
+              <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: csvUploaded ? '#232323' : 'var(--color-border-strong)', color: csvUploaded ? '#fff' : 'var(--color-text)' }}>
+                {csvUploaded ? <Check className="w-3 h-3" /> : <span className="text-xs">3</span>}
+              </span>
+              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 3 — Ahrefs Data</span>
+              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{csvUploaded ? 'CSV loaded' : 'Skipped'}</span>
+              <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
+            </button>
+          )}
+        </div>
+
+        {/* ── STEP 4: Audit table (full width) ── */}
+        {rows.length > 0 && wizardStep === 4 && (
+          <div className="px-8 pb-8 space-y-4">
+            {/* Stats */}
+            <div className="grid grid-cols-3 gap-3 max-w-xl">
               {[
                 { label: 'Cannibalizing Keywords', value: uniqueKeywordCount, color: '#FFECDB' },
                 { label: 'Affected URLs', value: uniqueUrlCount, color: '#B7EBFF' },
@@ -454,19 +547,20 @@ export default function Home() {
                 </div>
               ))}
             </div>
-          )}
 
-          {/* Table */}
-          {rows.length > 0 && (
+            {/* Table */}
             <div className="rounded-xl border overflow-auto" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
-              <table className="w-full text-sm min-w-[1200px]">
+              <table className="w-full text-sm" style={{ minWidth: '1000px' }}>
                 <thead>
                   <tr style={{ background: 'var(--color-surface)', borderBottom: '2px solid var(--color-border-strong)' }}>
-                    {['Keyword', 'URL', 'Pos', 'Days Ranked', 'Cannibal Count', 'Ref Domains', 'Total KWs', 'Clicks 6mo', 'Avg/mo', activeEvent || 'Key Events', 'Notes', 'Recommendation'].map(h => (
-                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap"
-                        style={{ color: 'var(--color-text-muted)' }}>
-                        {h}
-                      </th>
+                    {[
+                      'Keyword', 'URL', 'Pos', 'Days Ranked', 'Cannibal Count',
+                      ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
+                      'Clicks 6mo', 'Avg/mo',
+                      ...(activeEvent ? [activeEvent] : []),
+                      'Notes', 'Recommendation',
+                    ].map(h => (
+                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
@@ -475,10 +569,7 @@ export default function Home() {
                     kwRows.map((row, i) => (
                       <tr
                         key={`${keyword}-${row.url}-${i}`}
-                        style={{
-                          borderBottom: '1px solid var(--color-border)',
-                          borderTop: i === 0 ? '2px solid var(--color-border-strong)' : undefined,
-                        }}
+                        style={{ borderBottom: '1px solid var(--color-border)', borderTop: i === 0 ? '2px solid var(--color-border-strong)' : undefined }}
                         onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-row-hover)')}
                         onMouseLeave={e => (e.currentTarget.style.background = '')}
                       >
@@ -486,9 +577,7 @@ export default function Home() {
                           {i === 0 ? <span className="line-clamp-2 text-sm">{keyword}</span> : null}
                         </td>
                         <td className="px-4 py-2.5 font-mono text-xs max-w-[220px]" style={{ color: 'var(--color-text-muted)' }}>
-                          <span className="truncate block" title={row.url}>
-                            {row.url.replace(/^https?:\/\/[^/]+/, '') || '/'}
-                          </span>
+                          <span className="truncate block" title={row.url}>{row.url.replace(/^https?:\/\/[^/]+/, '') || '/'}</span>
                         </td>
                         <td className="px-4 py-2.5 text-center">
                           <span className={`text-sm font-mono ${positionColor(row.position)}`}>{row.position}</span>
@@ -503,54 +592,31 @@ export default function Home() {
                                 <div className="h-full rounded-full bg-[#232323]" style={{ width: `${Math.min(100, (row.daysRanked / row.totalDays) * 100)}%` }} />
                               </div>
                             </div>
-                          ) : (
-                            <span style={{ color: 'var(--color-border-strong)' }}>—</span>
-                          )}
+                          ) : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
                         </td>
                         <td className="px-4 py-2.5 text-center">
-                          <span className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-xs ${severityBadge(row.cannibalizationCount)}`}>
-                            {row.cannibalizationCount}
-                          </span>
+                          <span className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-xs ${severityBadge(row.cannibalizationCount)}`}>{row.cannibalizationCount}</span>
                         </td>
-                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                          {row.referringDomains !== null ? row.referringDomains : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
-                        </td>
-                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                          {row.totalKeywords !== null ? row.totalKeywords : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
-                        </td>
-                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                          {row.clicks6m !== null ? row.clicks6m.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
-                        </td>
-                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                          {row.avgMonthlyClicks !== null ? row.avgMonthlyClicks.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
-                        </td>
-                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                          {activeEvent && row.keyEvents?.[activeEvent] !== undefined
-                            ? <span className="font-semibold">{row.keyEvents[activeEvent].toLocaleString()}</span>
-                            : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
-                        </td>
+                        {csvUploaded && (
+                          <>
+                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.referringDomains !== null ? row.referringDomains : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
+                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.totalKeywords !== null ? row.totalKeywords : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
+                          </>
+                        )}
+                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.clicks6m !== null ? row.clicks6m.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
+                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.avgMonthlyClicks !== null ? row.avgMonthlyClicks.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
+                        {activeEvent && (
+                          <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                            {row.keyEvents?.[activeEvent] !== undefined ? <span className="font-semibold">{row.keyEvents[activeEvent].toLocaleString()}</span> : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
+                          </td>
+                        )}
                         <td className="px-4 py-2 min-w-[160px]">
-                          <input
-                            type="text"
-                            value={row.notes}
-                            onChange={e => handleNotesChange(keyword, row.url, e.target.value)}
-                            placeholder="Add note..."
-                            className="w-full bg-transparent text-xs py-1 outline-none"
-                            style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                            onFocus={e => e.target.style.borderBottomColor = '#232323'}
-                            onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'}
-                          />
+                          <input type="text" value={row.notes} onChange={e => handleNotesChange(keyword, row.url, e.target.value)} placeholder="Add note..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
                         </td>
                         <td className="px-4 py-2 min-w-[150px]">
                           <div className="relative">
-                            <select
-                              value={row.recommendation}
-                              onChange={e => handleRecChange(row.url, e.target.value as Recommendation)}
-                              className={`w-full appearance-none rounded-lg px-3 py-1.5 text-xs font-medium cursor-pointer outline-none pr-7 ${REC_STYLES[row.recommendation]}`}
-                            >
-                              {RECOMMENDATIONS.map(r => (
-                                <option key={r} value={r}>{r || 'Set rec...'}</option>
-                              ))}
+                            <select value={row.recommendation} onChange={e => handleRecChange(row.url, e.target.value as Recommendation)} className={`w-full appearance-none rounded-lg px-3 py-1.5 text-xs font-medium cursor-pointer outline-none pr-7 ${REC_STYLES[row.recommendation]}`}>
+                              {RECOMMENDATIONS.map(r => <option key={r} value={r}>{r || 'Set rec...'}</option>)}
                             </select>
                             <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none opacity-40" />
                           </div>
@@ -561,27 +627,8 @@ export default function Home() {
                 </tbody>
               </table>
             </div>
-          )}
-
-          {/* Empty state */}
-          {rows.length === 0 && !isLoading && status === 'authenticated' && (
-            <div className="card text-center py-20">
-              <div className="w-12 h-12 rounded-xl mx-auto mb-4 flex items-center justify-center" style={{ background: 'var(--color-sidebar)' }}>
-                <AlertTriangle className="w-5 h-5" style={{ color: 'var(--color-text-muted)' }} />
-              </div>
-              <p className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Select a property and pull data to begin</p>
-              <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>Pulls last 6 months of Search Console data</p>
-            </div>
-          )}
-
-          {/* Loading */}
-          {isLoading && (
-            <div className="card text-center py-20">
-              <div className="w-6 h-6 border-2 border-[#232323] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-              <p className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>{loadingMsg}</p>
-            </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </div>
   )
