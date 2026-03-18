@@ -60,6 +60,7 @@ export default function Home() {
   const [selectedEvent, setSelectedEvent] = useState('')
   const [activeEvent, setActiveEvent] = useState('')
   const [ga4Loading, setGa4Loading] = useState(false)
+  const [ga4PropertiesLoading, setGa4PropertiesLoading] = useState(false)
   const [ga4Error, setGa4Error] = useState<string | null>(null)
 
   // Fetch GSC sites + GA4 properties once authenticated
@@ -74,19 +75,21 @@ export default function Home() {
         })
         .catch(() => {})
 
+      setGa4PropertiesLoading(true)
       fetch('/api/ga4/properties')
         .then(r => r.json())
         .then(data => {
           if (data.error) {
-            setGa4Error(`GA4: ${data.error}`)
+            setGa4Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error))
             return
           }
           const props: Ga4Property[] = data.properties || []
           setGa4Properties(props)
           if (props.length > 0) setSelectedGa4Property(props[0].propertyId)
-          else setGa4Error('GA4: No properties found for this Google account')
+          else setGa4Error('No GA4 properties found for this Google account')
         })
-        .catch(e => setGa4Error(`GA4: ${e.message}`))
+        .catch(e => setGa4Error(e.message))
+        .finally(() => setGa4PropertiesLoading(false))
     }
   }, [session])
 
@@ -359,68 +362,68 @@ export default function Home() {
                   {csvDebug && <p className="text-[10px] mt-1" style={{ color: 'var(--color-text-muted)' }}>{csvDebug}</p>}
                 </div>
 
-                {/* GA4 Key Events */}
-                {ga4Properties.length > 0 && (
-                  <div className="flex items-end gap-2 flex-wrap">
-                    <div>
-                      <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>
-                        GA4 Property
-                      </label>
-                      <div className="relative">
-                        <select
-                          value={selectedGa4Property}
-                          onChange={e => setSelectedGa4Property(e.target.value)}
-                          className="appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8 max-w-[200px]"
-                          style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                        >
-                          {ga4Properties.map(p => (
-                            <option key={p.propertyId} value={p.propertyId}>{p.displayName}</option>
-                          ))}
-                        </select>
-                        <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
-                      </div>
+                {/* GA4 Key Events — always visible */}
+                <div className="flex items-end gap-2 flex-wrap">
+                  {ga4PropertiesLoading ? (
+                    <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                      <RefreshCw className="w-3 h-3 animate-spin" /> Loading GA4 properties...
                     </div>
-
-                    <div>
-                      <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>
-                        Key Event
-                      </label>
-                      <div className="relative">
-                        <select
-                          value={selectedEvent}
-                          onChange={e => setSelectedEvent(e.target.value)}
-                          className="appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8 max-w-[200px]"
-                          style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                        >
-                          {ga4EventNames.map(e => (
-                            <option key={e} value={e}>{e}</option>
-                          ))}
-                          {ga4EventNames.length === 0 && <option value="">Loading...</option>}
-                        </select>
-                        <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
-                      </div>
+                  ) : ga4Error ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-red-600">{ga4Error}</span>
+                      <button
+                        onClick={() => { setGa4Error(null); setGa4Properties([]); setGa4PropertiesLoading(true); fetch('/api/ga4/properties').then(r => r.json()).then(data => { const props = data.properties || []; setGa4Properties(props); if (props.length > 0) setSelectedGa4Property(props[0].propertyId); else setGa4Error('No GA4 properties found'); }).catch(e => setGa4Error(e.message)).finally(() => setGa4PropertiesLoading(false)) }}
+                        className="text-xs underline" style={{ color: 'var(--color-text-muted)' }}
+                      >Retry</button>
                     </div>
-
-                    <button
-                      onClick={handleAddEvents}
-                      disabled={ga4Loading || !selectedEvent || rows.length === 0}
-                      className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      style={activeEvent === selectedEvent
-                        ? { background: '#B7EBFF', borderColor: '#7dd3fc', color: '#0369a1' }
-                        : { background: 'var(--color-surface-elevated)', borderColor: 'rgba(183,235,255,0.6)', color: 'var(--color-text)' }}
-                    >
-                      <RefreshCw className={`w-4 h-4 ${ga4Loading ? 'animate-spin' : ''}`} />
-                      {ga4Loading ? 'Loading...' : activeEvent === selectedEvent ? 'Events Added ✓' : 'Add Events'}
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {ga4Error && (
-                <div className="mt-3 px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">
-                  {ga4Error}
+                  ) : ga4Properties.length > 0 ? (
+                    <>
+                      <div>
+                        <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>GA4 Property</label>
+                        <div className="relative">
+                          <select
+                            value={selectedGa4Property}
+                            onChange={e => setSelectedGa4Property(e.target.value)}
+                            className="appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8 max-w-[200px]"
+                            style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
+                          >
+                            {ga4Properties.map(p => (
+                              <option key={p.propertyId} value={p.propertyId}>{p.displayName}</option>
+                            ))}
+                          </select>
+                          <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Key Event</label>
+                        <div className="relative">
+                          <select
+                            value={selectedEvent}
+                            onChange={e => setSelectedEvent(e.target.value)}
+                            className="appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8 max-w-[200px]"
+                            style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
+                          >
+                            {ga4EventNames.map(e => (<option key={e} value={e}>{e}</option>))}
+                            {ga4EventNames.length === 0 && <option value="">Loading events...</option>}
+                          </select>
+                          <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
+                        </div>
+                      </div>
+                      <button
+                        onClick={handleAddEvents}
+                        disabled={ga4Loading || !selectedEvent || rows.length === 0}
+                        className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        style={activeEvent === selectedEvent
+                          ? { background: '#B7EBFF', borderColor: '#7dd3fc', color: '#0369a1' }
+                          : { background: 'var(--color-surface-elevated)', borderColor: 'rgba(183,235,255,0.6)', color: 'var(--color-text)' }}
+                      >
+                        <RefreshCw className={`w-4 h-4 ${ga4Loading ? 'animate-spin' : ''}`} />
+                        {ga4Loading ? 'Loading...' : activeEvent === selectedEvent ? 'Events Added ✓' : 'Add Events'}
+                      </button>
+                    </>
+                  ) : null}
                 </div>
-              )}
+              </div>
               </>
             )}
 
