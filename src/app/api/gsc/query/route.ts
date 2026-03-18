@@ -48,7 +48,6 @@ export async function POST(req: NextRequest) {
 
   const baseQuery = {
     startDate, endDate,
-    searchType: 'web',
     rowLimit: 25000,
     startRow: 0,
     dataState: 'final',

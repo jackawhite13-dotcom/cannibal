@@ -78,6 +78,7 @@ export default function Home() {
   const [ga4Loading, setGa4Loading] = useState(false)
   const [ga4PropertiesLoading, setGa4PropertiesLoading] = useState(false)
   const [ga4Error, setGa4Error] = useState<string | null>(null)
+  const [ga4MatchCount, setGa4MatchCount] = useState<number | null>(null)
 
   // Step 3 — Ahrefs
   const [topPages, setTopPages] = useState<Record<string, TopPageRow>>({})
@@ -181,11 +182,14 @@ export default function Home() {
       if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error))
       const pathMap: Record<string, number> = data.pathMap || {}
       setActiveEvent(selectedEvent)
+      let matched = 0
       setRows(prev => prev.map(row => {
         const path = row.url.replace(/^https?:\/\/[^/]+/, '').replace(/\/$/, '') || '/'
         const count = pathMap[path] ?? null
+        if (count !== null) matched++
         return { ...row, keyEvents: count !== null ? { ...(row.keyEvents || {}), [selectedEvent]: count } : row.keyEvents }
       }))
+      setGa4MatchCount(matched)
       setWizardStep(3)
     } catch (e: unknown) {
       setGa4Error(e instanceof Error ? e.message : 'Unknown error')
@@ -478,7 +482,9 @@ export default function Home() {
                 {activeEvent ? <Check className="w-3 h-3" /> : <span className="text-xs">2</span>}
               </span>
               <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 2 — GA4 Key Events</span>
-              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{activeEvent || 'Skipped'}</span>
+              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
+                {activeEvent ? `${activeEvent} · ${ga4MatchCount ?? 0} URLs matched` : 'Skipped'}
+              </span>
               <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
             </button>
           )}
