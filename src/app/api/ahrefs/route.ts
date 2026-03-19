@@ -27,10 +27,6 @@ export async function POST(req: NextRequest) {
     { field: 'serp_target_main_positions_count', is: ['gt', 1] },
   ]
 
-  if (country) {
-    conditions.push({ field: 'keyword_country', is: ['eq', country] })
-  }
-
   if (positionMin != null) {
     conditions.push({ field: 'best_position', is: ['gte', positionMin] })
   }
@@ -40,21 +36,28 @@ export async function POST(req: NextRequest) {
   }
 
   if (brandExclusion.trim()) {
-    conditions.push({ field: 'keyword', is: ['not_substring', brandExclusion.trim().toLowerCase()] })
+    conditions.push({ not: { field: 'keyword', is: ['isubstring', brandExclusion.trim()] } })
   }
 
-  const params = new URLSearchParams({
+  const params: Record<string, string> = {
     target: domain,
     mode: 'subdomains',
     date: today,
     select: 'keyword,volume,sum_traffic,best_position,best_position_url,serp_target_main_positions_count,all_positions',
-    where: JSON.stringify({ and: conditions }),
+    where: JSON.stringify(conditions.length === 1 ? conditions[0] : { and: conditions }),
     order_by: 'sum_traffic:desc',
     limit: '5000',
     output: 'json',
-  })
+  }
 
-  const response = await fetch(`${AHREFS_API_BASE}/site-explorer/organic-keywords?${params}`, {
+  // Country as top-level param (not in where clause)
+  if (country) {
+    params.country = country
+  }
+
+  const qs = new URLSearchParams(params)
+
+  const response = await fetch(`${AHREFS_API_BASE}/site-explorer/organic-keywords?${qs}`, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
     },
