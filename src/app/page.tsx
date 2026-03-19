@@ -9,18 +9,17 @@ import { parseTopPagesCsv } from '@/lib/parseTopPages'
 import { supabase } from '@/lib/supabase'
 import { Download, Upload, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, ChevronRight, X, Save } from 'lucide-react'
 
-type WizardStep = 1 | 2 | 3 | 4 | 5
+type WizardStep = 1 | 2 | 3 | 4 | 'methodology'
 
 const RECOMMENDATIONS: Recommendation[] = [
-  '', '301 Redirect', 'De-optimize', 'Consolidate', 'Protect', 'Monitor', 'No Action',
+  '', '301 Redirect', 'De-optimize', 'Consolidate', 'Optimize', 'No Action',
 ]
 
 const REC_STYLES: Record<string, string> = {
   '301 Redirect': 'bg-red-100 text-red-700',
   'De-optimize': 'bg-orange-100 text-orange-700',
   'Consolidate': 'bg-yellow-100 text-yellow-700',
-  'Protect': 'bg-[#C3F2D0] text-green-800',
-  'Monitor': 'bg-[#B7EBFF] text-sky-700',
+  'Optimize': 'bg-[#C3F2D0] text-green-800',
   'No Action': 'bg-[#F7E8FD] text-purple-600',
   '': 'bg-[rgba(248,214,185,0.3)] text-[rgba(35,35,35,0.4)]',
 }
@@ -307,18 +306,9 @@ export default function Home() {
     setRows(prev => prev.map(row => row.keyword === keyword && row.url === url ? { ...row, notes } : row))
   }
 
-  // #9: Delete a URL row from a keyword group
-  function handleDeleteRow(keyword: string, url: string) {
-    setRows(prev => {
-      const updated = prev.filter(r => !(r.keyword === keyword && r.url === url))
-      // Recalculate cannibal counts for this keyword
-      const remaining = updated.filter(r => r.keyword === keyword)
-      if (remaining.length < 2) {
-        // No longer cannibalizing — remove entire keyword group
-        return updated.filter(r => r.keyword !== keyword)
-      }
-      return updated.map(r => r.keyword === keyword ? { ...r, cannibalizationCount: remaining.length } : r)
-    })
+  // Delete entire keyword group from the audit
+  function handleDeleteKeywordGroup(keyword: string) {
+    setRows(prev => prev.filter(r => r.keyword !== keyword))
   }
 
   function handleExportCsv() {
@@ -391,8 +381,7 @@ export default function Home() {
     if (s === 1) return 'Ahrefs Keywords'
     if (s === 2) return 'Search Console'
     if (s === 3) return 'GA4 Key Events'
-    if (s === 4) return 'Audit'
-    return 'Methodology'
+    return 'Audit'
   }
 
   const SelectField = ({ label, value, onChange, options, maxW = 'max-w-[220px]' }: {
@@ -429,7 +418,7 @@ export default function Home() {
 
         {/* #3: All steps always clickable */}
         <nav className="flex-1 p-3 space-y-1">
-          {([1, 2, 3, 4, 5] as WizardStep[]).map(s => (
+          {([1, 2, 3, 4] as const).map(s => (
             <button
               key={s}
               onClick={() => setWizardStep(s)}
@@ -444,6 +433,15 @@ export default function Home() {
               {s === 3 && <span className="text-[9px] opacity-40 uppercase tracking-wide">opt</span>}
             </button>
           ))}
+          <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-sidebar-hover)' }}>
+            <button
+              onClick={() => setWizardStep('methodology')}
+              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${wizardStep === 'methodology' ? 'font-semibold border-l-2 border-[#232323]' : 'hover:opacity-70'}`}
+              style={{ background: wizardStep === 'methodology' ? 'rgba(248,214,185,0.6)' : 'transparent', color: 'var(--color-text)' }}
+            >
+              <span className="flex-1">Methodology</span>
+            </button>
+          </div>
         </nav>
 
         {/* #10: Saved audits list */}
@@ -674,10 +672,10 @@ export default function Home() {
               <>
                 <div className="rounded-xl border overflow-x-auto" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
                   <table className="text-sm w-max min-w-full">
-                    <thead>
+                    <thead className="sticky top-0 z-10">
                       <tr style={{ background: 'var(--color-surface)', borderBottom: '2px solid var(--color-border-strong)' }}>
                         {[
-                          'Keyword', 'URL', 'Avg Pos', 'Clicks', 'Days Ranked', 'URLs Competing',
+                          'Keyword', 'URL', 'Avg Pos', 'Clicks', 'Days Ranked', 'Audit Appearances',
                           ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
                           ...(activeEvent ? [activeEvent] : []),
                           'Notes', 'Rec', '',
@@ -698,8 +696,8 @@ export default function Home() {
                             <td className="px-4 py-2.5 font-semibold max-w-[180px]" style={{ color: 'var(--color-text)' }}>
                               <span className="line-clamp-2 text-sm">{keyword}</span>
                             </td>
-                            <td className="px-4 py-2.5 font-mono text-xs max-w-[220px]" style={{ color: 'var(--color-text)' }}>
-                              <span className="truncate block" title={row.url}>/{row.url.split('/').slice(1).join('/')}</span>
+                            <td className="px-4 py-2.5 font-mono text-xs whitespace-nowrap" style={{ color: 'var(--color-text)' }}>
+                              /{row.url.split('/').slice(1).join('/')}
                             </td>
                             <td className="px-4 py-2.5 text-center text-sm font-mono" style={{ color: 'var(--color-text)' }}>
                               {Math.round(row.position)}
@@ -743,9 +741,11 @@ export default function Home() {
                               </select>
                             </td>
                             <td className="px-1 py-2 w-6">
-                              <button onClick={() => handleDeleteRow(keyword, row.url)} className="opacity-20 hover:opacity-80 transition-opacity" title="Remove this URL from the audit">
-                                <X className="w-3 h-3" style={{ color: 'var(--color-text)' }} />
-                              </button>
+                              {i === 0 && (
+                                <button onClick={() => handleDeleteKeywordGroup(keyword)} className="opacity-20 hover:opacity-80 transition-opacity" title="Remove this keyword from the audit">
+                                  <X className="w-3 h-3" style={{ color: 'var(--color-text)' }} />
+                                </button>
+                              )}
                             </td>
                           </tr>
                         ))
@@ -769,7 +769,7 @@ export default function Home() {
           </div>
         )}
         {/* ── STEP 5: Methodology ── */}
-        {wizardStep === 5 && (
+        {wizardStep === 'methodology' && (
           <div className="px-8 py-6 max-w-2xl">
             <div className="card">
               <h2 className="text-lg font-semibold mb-4" style={{ color: 'var(--color-text)' }}>Why You Can Trust This Audit</h2>

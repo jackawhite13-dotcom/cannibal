@@ -2,8 +2,7 @@ export type Recommendation =
   | '301 Redirect'
   | 'De-optimize'
   | 'Consolidate'
-  | 'Protect'
-  | 'Monitor'
+  | 'Optimize'
   | 'No Action'
   | ''
 
