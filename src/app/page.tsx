@@ -9,7 +9,7 @@ import { parseTopPagesCsv } from '@/lib/parseTopPages'
 import { supabase } from '@/lib/supabase'
 import { Download, Upload, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, ChevronRight, X, Save } from 'lucide-react'
 
-type WizardStep = 1 | 2 | 3 | 4
+type WizardStep = 1 | 2 | 3 | 4 | 5
 
 const RECOMMENDATIONS: Recommendation[] = [
   '', '301 Redirect', 'De-optimize', 'Consolidate', 'Protect', 'Monitor', 'No Action',
@@ -25,29 +25,6 @@ const REC_STYLES: Record<string, string> = {
   '': 'bg-[rgba(248,214,185,0.3)] text-[rgba(35,35,35,0.4)]',
 }
 
-// Tooltips based on Growth SOP 016: Cannibalization Audit
-const TOOLTIPS: Record<string, string> = {
-  keyword: 'Keywords identified by Ahrefs where 2+ URLs from the same site rank simultaneously, creating competition that can limit rankings and traffic.',
-  url: 'Each URL that Google has shown in search results for this keyword. Multiple URLs here means they are competing against each other.',
-  avgPos: 'Average position in Google search results over the selected time period, sourced from Google Search Console. Lower is better.',
-  clicks: 'Total clicks this specific URL received for this keyword over the selected time period, from Google Search Console.',
-  daysRanked: 'Percentage of days this URL appeared in search results for this keyword. Higher % means a more consistent, real ranking vs. a one-off appearance.',
-  urlsCompeting: 'Total number of keywords this URL is involved in cannibalization for across the entire audit — not just this keyword.',
-  refDomains: 'Number of unique referring domains linking to this URL, from Ahrefs Top Pages export. More referring domains generally means stronger page authority.',
-  totalKws: 'Total number of keywords this URL ranks for in organic search, from Ahrefs Top Pages export.',
-  keyEvents: 'Key event count from GA4 for this URL path, filtered by your selected event, time period, country, and channel.',
-  notes: 'Free-form notes for your audit. Use this to document observations or context about this keyword-URL pair.',
-  rec: 'Your recommended action. Common actions: 301 Redirect (merge into target), De-optimize (reduce competing signals), Consolidate (merge content), Protect (keep as-is, it\'s the target), Monitor (watch but no action yet).',
-}
-
-const Tooltip = ({ text }: { text: string }) => (
-  <span className="relative group cursor-help ml-1 inline-flex">
-    <span className="w-3.5 h-3.5 rounded-full border border-current opacity-40 inline-flex items-center justify-center text-[8px] font-bold">?</span>
-    <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 w-56 text-left font-normal" style={{ background: '#232323', color: '#fff' }}>
-      {text}
-    </span>
-  </span>
-)
 
 interface Ga4Property { propertyId: string; displayName: string }
 interface SavedAudit { id: string; name: string; created_at: string; row_count: number }
@@ -414,7 +391,8 @@ export default function Home() {
     if (s === 1) return 'Ahrefs Keywords'
     if (s === 2) return 'Search Console'
     if (s === 3) return 'GA4 Key Events'
-    return 'Audit'
+    if (s === 4) return 'Audit'
+    return 'Methodology'
   }
 
   const SelectField = ({ label, value, onChange, options, maxW = 'max-w-[220px]' }: {
@@ -451,7 +429,7 @@ export default function Home() {
 
         {/* #3: All steps always clickable */}
         <nav className="flex-1 p-3 space-y-1">
-          {([1, 2, 3, 4] as WizardStep[]).map(s => (
+          {([1, 2, 3, 4, 5] as WizardStep[]).map(s => (
             <button
               key={s}
               onClick={() => setWizardStep(s)}
@@ -694,24 +672,18 @@ export default function Home() {
               </div>
             ) : (
               <>
-                <div className="rounded-xl border overflow-x-auto overflow-y-visible" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
-                  <table className="w-full text-sm" style={{ minWidth: '1200px' }}>
+                <div className="rounded-xl border overflow-x-auto" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
+                  <table className="text-sm w-max min-w-full">
                     <thead>
                       <tr style={{ background: 'var(--color-surface)', borderBottom: '2px solid var(--color-border-strong)' }}>
-                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Keyword<Tooltip text={TOOLTIPS.keyword} /></th>
-                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>URL<Tooltip text={TOOLTIPS.url} /></th>
-                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Avg Pos<Tooltip text={TOOLTIPS.avgPos} /></th>
-                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Clicks<Tooltip text={TOOLTIPS.clicks} /></th>
-                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Days Ranked<Tooltip text={TOOLTIPS.daysRanked} /></th>
-                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>URLs Competing<Tooltip text={TOOLTIPS.urlsCompeting} /></th>
-                        {csvUploaded && <>
-                          <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Ref Domains<Tooltip text={TOOLTIPS.refDomains} /></th>
-                          <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Total KWs<Tooltip text={TOOLTIPS.totalKws} /></th>
-                        </>}
-                        {activeEvent && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>{activeEvent}<Tooltip text={TOOLTIPS.keyEvents} /></th>}
-                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Notes<Tooltip text={TOOLTIPS.notes} /></th>
-                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Rec<Tooltip text={TOOLTIPS.rec} /></th>
-                        <th className="w-8"></th>
+                        {[
+                          'Keyword', 'URL', 'Avg Pos', 'Clicks', 'Days Ranked', 'URLs Competing',
+                          ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
+                          ...(activeEvent ? [activeEvent] : []),
+                          'Notes', 'Rec', '',
+                        ].map(h => (
+                          <th key={h} className={`text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap ${h === '' ? 'w-8' : ''}`} style={{ color: 'var(--color-text-muted)' }}>{h}</th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
@@ -766,16 +738,13 @@ export default function Home() {
                               <input type="text" value={row.notes} onChange={e => handleNotesChange(keyword, row.url, e.target.value)} placeholder="Add note..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
                             </td>
                             <td className="px-4 py-2 min-w-[130px]">
-                              <div className="relative">
-                                <select value={row.recommendation} onChange={e => handleRecChange(row.url, e.target.value as Recommendation)} className={`w-full appearance-none rounded-lg px-2 py-1.5 text-xs font-medium cursor-pointer outline-none pr-6 ${REC_STYLES[row.recommendation]}`}>
-                                  {RECOMMENDATIONS.map(r => <option key={r} value={r}>{r || 'Set rec...'}</option>)}
-                                </select>
-                                <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none opacity-40" />
-                              </div>
+                              <select value={row.recommendation} onChange={e => handleRecChange(row.url, e.target.value as Recommendation)} className={`w-full rounded-lg px-2 py-1.5 text-xs font-medium cursor-pointer outline-none ${REC_STYLES[row.recommendation]}`}>
+                                {RECOMMENDATIONS.map(r => <option key={r} value={r}>{r || 'Set rec...'}</option>)}
+                              </select>
                             </td>
-                            <td className="px-2 py-2 w-8">
+                            <td className="px-1 py-2 w-6">
                               <button onClick={() => handleDeleteRow(keyword, row.url)} className="opacity-20 hover:opacity-80 transition-opacity" title="Remove this URL from the audit">
-                                <X className="w-3.5 h-3.5" style={{ color: 'var(--color-text)' }} />
+                                <X className="w-3 h-3" style={{ color: 'var(--color-text)' }} />
                               </button>
                             </td>
                           </tr>
@@ -797,6 +766,31 @@ export default function Home() {
                 )}
               </>
             )}
+          </div>
+        )}
+        {/* ── STEP 5: Methodology ── */}
+        {wizardStep === 5 && (
+          <div className="px-8 py-6 max-w-2xl">
+            <div className="card">
+              <h2 className="text-lg font-semibold mb-4" style={{ color: 'var(--color-text)' }}>Why You Can Trust This Audit</h2>
+              <div className="space-y-4 text-sm leading-relaxed" style={{ color: 'var(--color-text)' }}>
+                <p>
+                  This cannibalization audit combines data from two authoritative, first-party sources to identify where multiple pages on a site compete for the same keywords in ways that limit rankings and traffic.
+                </p>
+                <p>
+                  <strong>Ahrefs</strong> identifies which keywords have multiple URLs ranking simultaneously by crawling Google search results directly. When you export with the &quot;Multiple URLs only&quot; filter enabled, you get a list of keywords where Google is showing two or more of your pages — a clear signal of internal competition. This list is the foundation of the audit.
+                </p>
+                <p>
+                  <strong>Google Search Console</strong> then provides the ground-truth performance data for those keywords. Unlike third-party estimates, GSC data comes directly from Google and reflects actual searcher behavior — real clicks, real impressions, and the actual average position Google assigned over the selected time period. The &quot;Days Ranked&quot; metric counts how many days each URL appeared in real search results, which separates genuine, persistent rankings from one-off appearances.
+                </p>
+                <p>
+                  The combination of these two sources means the audit is neither speculative nor estimated. Ahrefs confirms the cannibalization exists in Google&apos;s index. GSC confirms it&apos;s affecting real search performance. Keywords that appear in both sources with 2+ competing URLs represent verified cannibalization that warrants action.
+                </p>
+                <p>
+                  <strong>Optional enrichment</strong> from GA4 (key events like form submissions or purchases) and Ahrefs Top Pages (referring domains and total keyword counts per URL) adds business context — helping you decide which URL to protect and which to consolidate, redirect, or de-optimize.
+                </p>
+              </div>
+            </div>
           </div>
         )}
       </div>
