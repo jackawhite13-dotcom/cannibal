@@ -25,11 +25,29 @@ const REC_STYLES: Record<string, string> = {
   '': 'bg-[rgba(248,214,185,0.3)] text-[rgba(35,35,35,0.4)]',
 }
 
-const pctColor = (pct: number) => {
-  if (pct >= 75) return 'text-green-700'
-  if (pct >= 40) return 'text-amber-600'
-  return 'text-red-400'
+// Tooltips based on Growth SOP 016: Cannibalization Audit
+const TOOLTIPS: Record<string, string> = {
+  keyword: 'Keywords identified by Ahrefs where 2+ URLs from the same site rank simultaneously, creating competition that can limit rankings and traffic.',
+  url: 'Each URL that Google has shown in search results for this keyword. Multiple URLs here means they are competing against each other.',
+  avgPos: 'Average position in Google search results over the selected time period, sourced from Google Search Console. Lower is better.',
+  clicks: 'Total clicks this specific URL received for this keyword over the selected time period, from Google Search Console.',
+  daysRanked: 'Percentage of days this URL appeared in search results for this keyword. Higher % means a more consistent, real ranking vs. a one-off appearance.',
+  urlsCompeting: 'Total number of keywords this URL is involved in cannibalization for across the entire audit — not just this keyword.',
+  refDomains: 'Number of unique referring domains linking to this URL, from Ahrefs Top Pages export. More referring domains generally means stronger page authority.',
+  totalKws: 'Total number of keywords this URL ranks for in organic search, from Ahrefs Top Pages export.',
+  keyEvents: 'Key event count from GA4 for this URL path, filtered by your selected event, time period, country, and channel.',
+  notes: 'Free-form notes for your audit. Use this to document observations or context about this keyword-URL pair.',
+  rec: 'Your recommended action. Common actions: 301 Redirect (merge into target), De-optimize (reduce competing signals), Consolidate (merge content), Protect (keep as-is, it\'s the target), Monitor (watch but no action yet).',
 }
+
+const Tooltip = ({ text }: { text: string }) => (
+  <span className="relative group cursor-help ml-1 inline-flex">
+    <span className="w-3.5 h-3.5 rounded-full border border-current opacity-40 inline-flex items-center justify-center text-[8px] font-bold">?</span>
+    <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 w-56 text-left font-normal" style={{ background: '#232323', color: '#fff' }}>
+      {text}
+    </span>
+  </span>
+)
 
 interface Ga4Property { propertyId: string; displayName: string }
 interface SavedAudit { id: string; name: string; created_at: string; row_count: number }
@@ -190,6 +208,14 @@ export default function Home() {
   }, {} as Record<string, AuditRow[]>)
 
   const cannibalGroups = Object.entries(groupedByKeyword).filter(([, g]) => g.length >= 2)
+
+  // URLs competing = how many keyword groups this URL appears in across the entire audit
+  const urlCompetingCount: Record<string, number> = {}
+  for (const [, g] of cannibalGroups) {
+    for (const row of g) {
+      urlCompetingCount[row.url] = (urlCompetingCount[row.url] || 0) + 1
+    }
+  }
 
   function handleAhrefsCsv(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -668,18 +694,24 @@ export default function Home() {
               </div>
             ) : (
               <>
-                <div className="rounded-xl border overflow-auto" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
-                  <table className="w-full text-sm" style={{ minWidth: '900px' }}>
+                <div className="rounded-xl border overflow-x-auto overflow-y-visible" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
+                  <table className="w-full text-sm" style={{ minWidth: '1200px' }}>
                     <thead>
                       <tr style={{ background: 'var(--color-surface)', borderBottom: '2px solid var(--color-border-strong)' }}>
-                        {[
-                          'Keyword', 'URL', 'Avg Pos', 'Clicks', 'Days Ranked', 'URLs Competing',
-                          ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
-                          ...(activeEvent ? [activeEvent] : []),
-                          'Notes', 'Rec', '',
-                        ].map(h => (
-                          <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>{h}</th>
-                        ))}
+                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Keyword<Tooltip text={TOOLTIPS.keyword} /></th>
+                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>URL<Tooltip text={TOOLTIPS.url} /></th>
+                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Avg Pos<Tooltip text={TOOLTIPS.avgPos} /></th>
+                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Clicks<Tooltip text={TOOLTIPS.clicks} /></th>
+                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Days Ranked<Tooltip text={TOOLTIPS.daysRanked} /></th>
+                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>URLs Competing<Tooltip text={TOOLTIPS.urlsCompeting} /></th>
+                        {csvUploaded && <>
+                          <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Ref Domains<Tooltip text={TOOLTIPS.refDomains} /></th>
+                          <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Total KWs<Tooltip text={TOOLTIPS.totalKws} /></th>
+                        </>}
+                        {activeEvent && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>{activeEvent}<Tooltip text={TOOLTIPS.keyEvents} /></th>}
+                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Notes<Tooltip text={TOOLTIPS.notes} /></th>
+                        <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Rec<Tooltip text={TOOLTIPS.rec} /></th>
+                        <th className="w-8"></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -687,31 +719,26 @@ export default function Home() {
                         kwRows.map((row, i) => (
                           <tr
                             key={`${keyword}-${row.url}-${i}`}
-                            /* #7: stronger group dividers */
                             style={{ borderBottom: '1px solid var(--color-border)', borderTop: i === 0 ? '3px solid #232323' : undefined }}
                             onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-row-hover)')}
                             onMouseLeave={e => (e.currentTarget.style.background = '')}
                           >
-                            {/* #8: keyword on every row */}
                             <td className="px-4 py-2.5 font-semibold max-w-[180px]" style={{ color: 'var(--color-text)' }}>
                               <span className="line-clamp-2 text-sm">{keyword}</span>
                             </td>
-                            {/* #4: URL same dark color */}
                             <td className="px-4 py-2.5 font-mono text-xs max-w-[220px]" style={{ color: 'var(--color-text)' }}>
                               <span className="truncate block" title={row.url}>/{row.url.split('/').slice(1).join('/')}</span>
                             </td>
-                            {/* #4: position plain dark, rounded to 1 decimal */}
                             <td className="px-4 py-2.5 text-center text-sm font-mono" style={{ color: 'var(--color-text)' }}>
-                              {row.position}
+                              {Math.round(row.position)}
                             </td>
-                            {/* #4: clicks plain dark */}
                             <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
                               {row.clicks.toLocaleString()}
                             </td>
                             <td className="px-4 py-2.5 text-center whitespace-nowrap">
                               {row.daysRankedPct !== null ? (
                                 <div className="flex flex-col items-center gap-0.5">
-                                  <span className={`text-xs font-semibold ${pctColor(row.daysRankedPct)}`}>
+                                  <span className="text-xs font-semibold" style={{ color: 'var(--color-text)' }}>
                                     {row.daysRankedPct}%
                                   </span>
                                   <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{row.daysRanked}/{row.totalDays}d</span>
@@ -719,22 +746,20 @@ export default function Home() {
                                     <div className="h-full rounded-full bg-[#232323]" style={{ width: `${Math.min(100, row.daysRankedPct)}%` }} />
                                   </div>
                                 </div>
-                              ) : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
+                              ) : <span style={{ color: 'var(--color-text)' }}>0%</span>}
                             </td>
-                            {/* #6: cannibal count plain text, no bubble */}
                             <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                              {row.cannibalizationCount}
+                              {urlCompetingCount[row.url] || 1}
                             </td>
-                            {/* #5: ref domains and total keywords */}
                             {csvUploaded && (
                               <>
-                                <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.referringDomains !== null ? row.referringDomains.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
-                                <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.totalKeywords !== null ? row.totalKeywords.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
+                                <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.referringDomains !== null ? row.referringDomains.toLocaleString() : '0'}</td>
+                                <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.totalKeywords !== null ? row.totalKeywords.toLocaleString() : '0'}</td>
                               </>
                             )}
                             {activeEvent && (
                               <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                                {row.keyEvents?.[activeEvent] !== undefined ? row.keyEvents[activeEvent].toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
+                                {row.keyEvents?.[activeEvent] !== undefined ? row.keyEvents[activeEvent].toLocaleString() : '0'}
                               </td>
                             )}
                             <td className="px-4 py-2 min-w-[140px]">
@@ -748,9 +773,8 @@ export default function Home() {
                                 <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none opacity-40" />
                               </div>
                             </td>
-                            {/* #9: delete row */}
-                            <td className="px-2 py-2">
-                              <button onClick={() => handleDeleteRow(keyword, row.url)} className="opacity-30 hover:opacity-100 transition-opacity" title="Remove this URL">
+                            <td className="px-2 py-2 w-8">
+                              <button onClick={() => handleDeleteRow(keyword, row.url)} className="opacity-20 hover:opacity-80 transition-opacity" title="Remove this URL from the audit">
                                 <X className="w-3.5 h-3.5" style={{ color: 'var(--color-text)' }} />
                               </button>
                             </td>
