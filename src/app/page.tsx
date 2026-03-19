@@ -1,12 +1,13 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSession, signIn, signOut } from 'next-auth/react'
 import { AuditRow, Recommendation, GscSite, TopPageRow } from '@/types/audit'
 import { buildAuditRows, enrichWithTopPages, syncRecommendation } from '@/lib/buildAuditRows'
 import { parseAhrefsCsv } from '@/lib/parseAhrefsCsv'
 import { parseTopPagesCsv } from '@/lib/parseTopPages'
-import { Download, Upload, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, ChevronRight } from 'lucide-react'
+import { supabase } from '@/lib/supabase'
+import { Download, Upload, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, ChevronRight, X, Save } from 'lucide-react'
 
 type WizardStep = 1 | 2 | 3 | 4
 
@@ -24,20 +25,6 @@ const REC_STYLES: Record<string, string> = {
   '': 'bg-[rgba(248,214,185,0.3)] text-[rgba(35,35,35,0.4)]',
 }
 
-const severityBadge = (count: number) => {
-  if (count >= 10) return 'bg-red-100 text-red-700 font-bold'
-  if (count >= 5) return 'bg-orange-100 text-orange-700 font-semibold'
-  if (count >= 2) return 'bg-[#FFECDB] text-amber-700'
-  return 'bg-[rgba(248,214,185,0.3)] text-[rgba(35,35,35,0.45)]'
-}
-
-const positionColor = (pos: number) => {
-  if (pos <= 3) return 'text-green-700 font-bold'
-  if (pos <= 10) return 'text-amber-600 font-semibold'
-  if (pos <= 30) return 'text-orange-500'
-  return 'text-red-400'
-}
-
 const pctColor = (pct: number) => {
   if (pct >= 75) return 'text-green-700'
   if (pct >= 40) return 'text-amber-600'
@@ -45,6 +32,7 @@ const pctColor = (pct: number) => {
 }
 
 interface Ga4Property { propertyId: string; displayName: string }
+interface SavedAudit { id: string; name: string; created_at: string; row_count: number }
 
 const DATE_RANGES = [
   { label: '30 days', value: 30 },
@@ -111,6 +99,11 @@ export default function Home() {
   const [ga4Country, setGa4Country] = useState('')
   const [ga4ChannelGroup, setGa4ChannelGroup] = useState('')
 
+  // #10: Supabase saved audits
+  const [savedAudits, setSavedAudits] = useState<SavedAudit[]>([])
+  const [auditName, setAuditName] = useState('')
+  const [saving, setSaving] = useState(false)
+
   // Restore data after Google sign-in redirect
   useEffect(() => {
     try {
@@ -127,9 +120,9 @@ export default function Home() {
     } catch {}
   }, [])
 
-  // Load GSC sites when authenticated and on step 2
+  // Load GSC sites when authenticated (not gated to step 2 — #3 free nav)
   useEffect(() => {
-    if (wizardStep === 2 && session?.access_token && sites.length === 0) {
+    if (session?.access_token && sites.length === 0) {
       fetch('/api/gsc/sites')
         .then(r => r.json())
         .then(data => {
@@ -139,11 +132,11 @@ export default function Home() {
         })
         .catch(() => {})
     }
-  }, [wizardStep, session])
+  }, [session])
 
-  // Load GA4 properties when reaching step 3
+  // Load GA4 properties when authenticated (not gated to step 3 — #3 free nav)
   useEffect(() => {
-    if (wizardStep === 3 && session?.access_token && ga4Properties.length === 0 && !ga4PropertiesLoading && !ga4Error) {
+    if (session?.access_token && ga4Properties.length === 0 && !ga4PropertiesLoading && !ga4Error) {
       setGa4PropertiesLoading(true)
       fetch('/api/ga4/properties')
         .then(r => r.json())
@@ -152,12 +145,11 @@ export default function Home() {
           const props: Ga4Property[] = data.properties || []
           setGa4Properties(props)
           if (props.length > 0) setSelectedGa4Property(props[0].propertyId)
-          else setGa4Error('No GA4 properties found for this account')
         })
         .catch(e => setGa4Error(e.message))
         .finally(() => setGa4PropertiesLoading(false))
     }
-  }, [wizardStep, session])
+  }, [session])
 
   // Load GA4 event names when property changes
   useEffect(() => {
@@ -178,20 +170,33 @@ export default function Home() {
       .catch(e => setGa4Error(e.message))
   }, [selectedGa4Property])
 
+  // #10: Load saved audits from Supabase
+  const loadSavedAudits = useCallback(async () => {
+    if (!supabase) return
+    const { data } = await supabase
+      .from('cannibal_audits')
+      .select('id, name, created_at, row_count')
+      .order('created_at', { ascending: false })
+    if (data) setSavedAudits(data)
+  }, [])
+
+  useEffect(() => { loadSavedAudits() }, [loadSavedAudits])
+
+  // #1: Filter grouped keywords to only 2+ URL groups
   const groupedByKeyword = rows.reduce((acc, row) => {
     if (!acc[row.keyword]) acc[row.keyword] = []
     acc[row.keyword].push(row)
     return acc
   }, {} as Record<string, AuditRow[]>)
 
-  // Step 1: Upload Ahrefs CSV
+  const cannibalGroups = Object.entries(groupedByKeyword).filter(([, g]) => g.length >= 2)
+
   function handleAhrefsCsv(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
     const reader = new FileReader()
     reader.onload = (ev) => {
       const buf = ev.target?.result as ArrayBuffer
-      // Try UTF-16 first, fall back to UTF-8
       let text: string
       const bytes = new Uint8Array(buf)
       if ((bytes[0] === 0xFF && bytes[1] === 0xFE) || (bytes[0] === 0xFE && bytes[1] === 0xFF)) {
@@ -205,7 +210,6 @@ export default function Home() {
     reader.readAsArrayBuffer(file)
   }
 
-  // Step 1: Upload Top Pages CSV
   function handleTopPagesCsv(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
@@ -234,7 +238,6 @@ export default function Home() {
     signIn('google')
   }
 
-  // Step 2: GSC pull
   async function handleGscPull() {
     if (!selectedSite || ahrefsKeywords.length === 0) return
     setGscLoading(true)
@@ -246,40 +249,23 @@ export default function Home() {
       const res = await fetch('/api/gsc/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          siteUrl: selectedSite,
-          dateRange: gscDateRange,
-          country: gscCountry,
-          keywords: ahrefsKeywords,
-        }),
+        body: JSON.stringify({ siteUrl: selectedSite, dateRange: gscDateRange, country: gscCountry, keywords: ahrefsKeywords }),
         signal: controller.signal,
       })
       clearTimeout(timer)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed to fetch GSC data')
-
-      const built = buildAuditRows(
-        data.keywordUrlData || {},
-        data.daysMap || {},
-        data.totalDays,
-        ahrefsKeywords,
-        csvUploaded ? topPages : undefined,
-      )
+      const built = buildAuditRows(data.keywordUrlData || {}, data.daysMap || {}, data.totalDays, ahrefsKeywords, csvUploaded ? topPages : undefined)
       setRows(built)
-      setWizardStep(3)
+      setWizardStep(4)
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Unknown error'
-      if (msg.includes('abort')) {
-        setGscError('Request timed out. Try a shorter time period (30 days) or skip this step.')
-      } else {
-        setGscError(msg)
-      }
+      setGscError(msg.includes('abort') ? 'Request timed out. Try 30 days or a smaller keyword list.' : msg)
     } finally {
       setGscLoading(false)
     }
   }
 
-  // Step 3: GA4 events
   async function handleAddEvents() {
     if (!selectedGa4Property || !selectedEvent) return
     setGa4Loading(true)
@@ -287,13 +273,7 @@ export default function Home() {
       const res = await fetch('/api/ga4/events', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          propertyId: selectedGa4Property,
-          eventName: selectedEvent,
-          dateRange: ga4DateRange,
-          country: ga4Country || undefined,
-          channelGroup: ga4ChannelGroup || undefined,
-        }),
+        body: JSON.stringify({ propertyId: selectedGa4Property, eventName: selectedEvent, dateRange: ga4DateRange, country: ga4Country || undefined, channelGroup: ga4ChannelGroup || undefined }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error))
@@ -321,9 +301,21 @@ export default function Home() {
   }
 
   function handleNotesChange(keyword: string, url: string, notes: string) {
-    setRows(prev => prev.map(row =>
-      row.keyword === keyword && row.url === url ? { ...row, notes } : row
-    ))
+    setRows(prev => prev.map(row => row.keyword === keyword && row.url === url ? { ...row, notes } : row))
+  }
+
+  // #9: Delete a URL row from a keyword group
+  function handleDeleteRow(keyword: string, url: string) {
+    setRows(prev => {
+      const updated = prev.filter(r => !(r.keyword === keyword && r.url === url))
+      // Recalculate cannibal counts for this keyword
+      const remaining = updated.filter(r => r.keyword === keyword)
+      if (remaining.length < 2) {
+        // No longer cannibalizing — remove entire keyword group
+        return updated.filter(r => r.keyword !== keyword)
+      }
+      return updated.map(r => r.keyword === keyword ? { ...r, cannibalizationCount: remaining.length } : r)
+    })
   }
 
   function handleExportCsv() {
@@ -332,7 +324,8 @@ export default function Home() {
       ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
       ...(activeEvent ? [eventHeader] : []),
       'Notes', 'Recommendation']
-    const csvRows = rows.map(r => [
+    const exportRows = rows.filter(r => r.cannibalizationCount >= 2)
+    const csvRows = exportRows.map(r => [
       r.keyword, r.url, r.position, r.clicks,
       r.daysRanked !== null ? `${r.daysRanked}/${r.totalDays}` : '',
       r.daysRankedPct !== null ? `${r.daysRankedPct}%` : '',
@@ -351,8 +344,38 @@ export default function Home() {
     a.click()
   }
 
-  const uniqueKeywordCount = Object.keys(groupedByKeyword).length
-  const uniqueUrlCount = new Set(rows.map(r => r.url)).size
+  // #10: Save audit to Supabase
+  async function handleSaveAudit() {
+    if (!supabase || !auditName.trim()) return
+    setSaving(true)
+    const cannibalRows = rows.filter(r => r.cannibalizationCount >= 2)
+    const { error } = await supabase.from('cannibal_audits').insert({
+      name: auditName.trim(),
+      rows: cannibalRows,
+      keywords: ahrefsKeywords,
+      row_count: cannibalRows.length,
+      site: selectedSite,
+      active_event: activeEvent || null,
+    })
+    if (!error) {
+      setAuditName('')
+      loadSavedAudits()
+    }
+    setSaving(false)
+  }
+
+  // #10: Load a saved audit
+  async function handleLoadAudit(id: string) {
+    if (!supabase) return
+    const { data } = await supabase.from('cannibal_audits').select('*').eq('id', id).single()
+    if (data) {
+      setRows(data.rows || [])
+      setAhrefsKeywords(data.keywords || [])
+      setActiveEvent(data.active_event || '')
+      if (data.site) setSelectedSite(data.site)
+      setWizardStep(4)
+    }
+  }
 
   const stepDone = (s: WizardStep) => {
     if (s === 1) return ahrefsKeywords.length > 0
@@ -366,13 +389,6 @@ export default function Home() {
     if (s === 2) return 'Search Console'
     if (s === 3) return 'GA4 Key Events'
     return 'Audit'
-  }
-
-  const stepSummary = (s: WizardStep) => {
-    if (s === 1) return `${ahrefsKeywords.length} keywords loaded`
-    if (s === 2) return rows.length > 0 ? `${uniqueKeywordCount} keywords · ${uniqueUrlCount} URLs · ${gscDateRange}d` : 'Not run'
-    if (s === 3) return activeEvent ? `${activeEvent} · ${ga4MatchCount ?? 0} URLs matched` : 'Skipped'
-    return ''
   }
 
   const SelectField = ({ label, value, onChange, options, maxW = 'max-w-[220px]' }: {
@@ -407,11 +423,12 @@ export default function Home() {
           </div>
         </div>
 
+        {/* #3: All steps always clickable */}
         <nav className="flex-1 p-3 space-y-1">
-          {([1, 2, 3] as WizardStep[]).map(s => (
+          {([1, 2, 3, 4] as WizardStep[]).map(s => (
             <button
               key={s}
-              onClick={() => (s === 1 || ahrefsKeywords.length > 0) ? setWizardStep(s) : null}
+              onClick={() => setWizardStep(s)}
               className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${wizardStep === s ? 'font-semibold border-l-2 border-[#232323]' : 'hover:opacity-70'}`}
               style={{ background: wizardStep === s ? 'rgba(248,214,185,0.6)' : 'transparent', color: 'var(--color-text)' }}
             >
@@ -423,17 +440,21 @@ export default function Home() {
               {s === 3 && <span className="text-[9px] opacity-40 uppercase tracking-wide">opt</span>}
             </button>
           ))}
-          {rows.length > 0 && (
-            <button
-              onClick={() => setWizardStep(4)}
-              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${wizardStep === 4 ? 'font-semibold border-l-2 border-[#232323]' : 'hover:opacity-70'}`}
-              style={{ background: wizardStep === 4 ? 'rgba(248,214,185,0.6)' : 'transparent', color: 'var(--color-text)' }}
-            >
-              <span className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] flex-shrink-0 border border-current opacity-50">4</span>
-              <span>Audit</span>
-            </button>
-          )}
         </nav>
+
+        {/* #10: Saved audits list */}
+        {savedAudits.length > 0 && (
+          <div className="px-3 pb-2">
+            <div className="text-[10px] uppercase tracking-wide font-semibold mb-2 px-1" style={{ color: 'var(--color-text-muted)' }}>Saved Audits</div>
+            <div className="space-y-0.5 max-h-40 overflow-y-auto">
+              {savedAudits.map(a => (
+                <button key={a.id} onClick={() => handleLoadAudit(a.id)} className="w-full text-left px-2 py-1.5 rounded text-xs hover:opacity-70 truncate" style={{ color: 'var(--color-text)' }}>
+                  {a.name} <span style={{ color: 'var(--color-text-muted)' }}>({a.row_count})</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="p-4 border-t" style={{ borderColor: 'var(--color-sidebar-hover)' }}>
           {status === 'authenticated' ? (
@@ -473,11 +494,9 @@ export default function Home() {
                 <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Ahrefs Keywords</h2>
                 <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: '#232323', color: '#fff' }}>Required</span>
               </div>
-
               <p className="text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
                 Export your cannibalizing keywords from Ahrefs (with &quot;Multiple URLs only&quot; toggled on) and upload the CSV here.
               </p>
-
               <div className="space-y-4">
                 <div className="flex items-center gap-3">
                   <button onClick={() => ahrefsCsvRef.current?.click()} className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium border transition-colors" style={ahrefsKeywords.length > 0 ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
@@ -486,16 +505,11 @@ export default function Home() {
                   </button>
                   <input ref={ahrefsCsvRef} type="file" accept=".csv" className="hidden" onChange={handleAhrefsCsv} />
                 </div>
-
                 {ahrefsKeywords.length > 0 && (
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => setWizardStep(2)} className="flex items-center gap-1 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
-                      Next: Search Console <ChevronRight className="w-4 h-4" />
-                    </button>
-                  </div>
+                  <button onClick={() => setWizardStep(2)} className="flex items-center gap-1 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
+                    Next: Search Console <ChevronRight className="w-4 h-4" />
+                  </button>
                 )}
-
-                {/* Top Pages CSV (optional) */}
                 <div className="pt-4 border-t" style={{ borderColor: 'var(--color-border)' }}>
                   <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>
                     Ahrefs Top Pages CSV <span className="font-normal">(optional — adds Referring Domains &amp; Total Keywords)</span>
@@ -513,16 +527,6 @@ export default function Home() {
             </div>
           )}
 
-          {/* Step 1 summary */}
-          {ahrefsKeywords.length > 0 && wizardStep > 1 && (
-            <button onClick={() => setWizardStep(1)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
-              <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center flex-shrink-0"><Check className="w-3 h-3" /></span>
-              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 1 — Ahrefs</span>
-              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{stepSummary(1)}</span>
-              <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
-            </button>
-          )}
-
           {/* ── STEP 2: GSC ── */}
           {wizardStep === 2 && (
             <div className="card">
@@ -531,11 +535,9 @@ export default function Home() {
                 <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Search Console</h2>
                 <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: '#232323', color: '#fff' }}>Required</span>
               </div>
-
               <p className="text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
-                Finds all competing URLs for your {ahrefsKeywords.length} keywords, plus avg position, clicks, and days ranked.
+                Finds all competing URLs for your {ahrefsKeywords.length || '—'} keywords, plus avg position, clicks, and days ranked.
               </p>
-
               {status !== 'authenticated' ? (
                 <div>
                   <p className="text-sm mb-3" style={{ color: 'var(--color-text-muted)' }}>Sign in with Google to access Search Console data.</p>
@@ -555,7 +557,6 @@ export default function Home() {
                       <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
                     </div>
                   </div>
-
                   <div>
                     <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Time Period</label>
                     <div className="flex gap-2">
@@ -566,28 +567,16 @@ export default function Home() {
                       ))}
                     </div>
                   </div>
-
                   <SelectField label="Country" value={gscCountry} onChange={setGscCountry} options={GSC_COUNTRIES} />
-
-                  <button onClick={handleGscPull} disabled={gscLoading || !selectedSite} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
+                  <button onClick={handleGscPull} disabled={gscLoading || !selectedSite || ahrefsKeywords.length === 0} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
                     <RefreshCw className={`w-4 h-4 ${gscLoading ? 'animate-spin' : ''}`} />
                     {gscLoading ? 'Pulling GSC data... this can take 15-30s' : 'Pull Data'}
                   </button>
-
+                  {ahrefsKeywords.length === 0 && <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>Upload Ahrefs keywords in Step 1 first.</p>}
                   {gscError && <div className="px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{gscError}</div>}
                 </div>
               )}
             </div>
-          )}
-
-          {/* Step 2 summary */}
-          {rows.length > 0 && wizardStep > 2 && (
-            <button onClick={() => setWizardStep(2)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
-              <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center flex-shrink-0"><Check className="w-3 h-3" /></span>
-              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 2 — Search Console</span>
-              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{stepSummary(2)}</span>
-              <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
-            </button>
           )}
 
           {/* ── STEP 3: GA4 ── */}
@@ -598,7 +587,6 @@ export default function Home() {
                 <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>GA4 Key Events</h2>
                 <span className="text-[10px] px-2 py-0.5 rounded-full border font-medium" style={{ borderColor: 'var(--color-border-strong)', color: 'var(--color-text-muted)' }}>Optional</span>
               </div>
-
               {status !== 'authenticated' ? (
                 <div>
                   <p className="text-sm mb-3" style={{ color: 'var(--color-text-muted)' }}>Sign in with Google to access GA4 data.</p>
@@ -635,7 +623,6 @@ export default function Home() {
                       </div>
                     </div>
                   </div>
-
                   <div className="flex gap-3 flex-wrap">
                     <div>
                       <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Time Period</label>
@@ -650,14 +637,12 @@ export default function Home() {
                     <SelectField label="Country" value={ga4Country} onChange={setGa4Country} options={[{ label: 'All countries', value: '' }, { label: 'United States', value: 'United States' }, { label: 'United Kingdom', value: 'United Kingdom' }, { label: 'Canada', value: 'Canada' }, { label: 'Australia', value: 'Australia' }, { label: 'Germany', value: 'Germany' }, { label: 'France', value: 'France' }, { label: 'India', value: 'India' }]} />
                     <SelectField label="Channel" value={ga4ChannelGroup} onChange={setGa4ChannelGroup} options={GA4_CHANNELS} />
                   </div>
-
                   <button onClick={handleAddEvents} disabled={ga4Loading || !selectedEvent} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
                     <RefreshCw className={`w-4 h-4 ${ga4Loading ? 'animate-spin' : ''}`} />
                     {ga4Loading ? 'Loading events...' : 'Add Events'}
                   </button>
                 </div>
               ) : null}
-
               <div className="mt-5 pt-4 border-t flex items-center justify-between" style={{ borderColor: 'var(--color-border)' }}>
                 <button onClick={() => setWizardStep(4)} className="text-sm hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>
                   Skip this step →
@@ -670,123 +655,124 @@ export default function Home() {
               </div>
             </div>
           )}
-
-          {/* Step summaries on audit page */}
-          {rows.length > 0 && wizardStep === 4 && (
-            <>
-              <button onClick={() => setWizardStep(2)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
-                <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center flex-shrink-0"><Check className="w-3 h-3" /></span>
-                <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 2 — Search Console</span>
-                <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{stepSummary(2)}</span>
-                <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
-              </button>
-              <button onClick={() => setWizardStep(3)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
-                <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: activeEvent ? '#232323' : 'var(--color-border-strong)', color: activeEvent ? '#fff' : 'var(--color-text)' }}>
-                  {activeEvent ? <Check className="w-3 h-3" /> : <span className="text-xs">3</span>}
-                </span>
-                <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 3 — GA4 Key Events</span>
-                <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{stepSummary(3)}</span>
-                <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
-              </button>
-            </>
-          )}
         </div>
 
         {/* ── STEP 4: Audit table ── */}
-        {rows.length > 0 && wizardStep === 4 && (
+        {wizardStep === 4 && (
           <div className="px-8 pb-8 space-y-4">
-            <div className="grid grid-cols-3 gap-3 max-w-xl">
-              {[
-                { label: 'Ahrefs Keywords', value: ahrefsKeywords.length, color: '#FFECDB' },
-                { label: 'GSC Cannibalizing (2+ URLs)', value: Object.values(groupedByKeyword).filter(g => g.length >= 2).length, color: '#B7EBFF' },
-                { label: 'GSC Single URL', value: Object.values(groupedByKeyword).filter(g => g.length === 1).length, color: '#F7E8FD' },
-              ].map(stat => (
-                <div key={stat.label} className="rounded-xl p-4 border" style={{ background: stat.color, borderColor: 'var(--color-border-strong)' }}>
-                  <div className="text-2xl font-bold" style={{ color: 'var(--color-text)' }}>{stat.value.toLocaleString()}</div>
-                  <div className="text-xs font-medium mt-0.5" style={{ color: 'var(--color-text-muted)' }}>{stat.label}</div>
-                </div>
-              ))}
-            </div>
+            {/* #2: Stat boxes removed */}
 
-            <div className="rounded-xl border overflow-auto" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
-              <table className="w-full text-sm" style={{ minWidth: '900px' }}>
-                <thead>
-                  <tr style={{ background: 'var(--color-surface)', borderBottom: '2px solid var(--color-border-strong)' }}>
-                    {[
-                      'Keyword', 'URL', 'Avg Pos', 'Clicks', 'Days Ranked', 'Cannibal Count',
-                      ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
-                      ...(activeEvent ? [activeEvent] : []),
-                      'Notes', 'Recommendation',
-                    ].map(h => (
-                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(groupedByKeyword).map(([keyword, kwRows]) =>
-                    kwRows.map((row, i) => (
-                      <tr
-                        key={`${keyword}-${row.url}-${i}`}
-                        style={{ borderBottom: '1px solid var(--color-border)', borderTop: i === 0 ? '2px solid var(--color-border-strong)' : undefined }}
-                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-row-hover)')}
-                        onMouseLeave={e => (e.currentTarget.style.background = '')}
-                      >
-                        <td className="px-4 py-2.5 font-semibold max-w-[180px]" style={{ color: 'var(--color-text)' }}>
-                          {i === 0 ? <span className="line-clamp-2 text-sm">{keyword}</span> : null}
-                        </td>
-                        <td className="px-4 py-2.5 font-mono text-xs max-w-[220px]" style={{ color: 'var(--color-text-muted)' }}>
-                          <span className="truncate block" title={row.url}>/{row.url.split('/').slice(1).join('/')}</span>
-                        </td>
-                        <td className="px-4 py-2.5 text-center">
-                          <span className={`text-sm font-mono ${positionColor(row.position)}`}>{row.position}</span>
-                        </td>
-                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                          {row.clicks.toLocaleString()}
-                        </td>
-                        <td className="px-4 py-2.5 text-center whitespace-nowrap">
-                          {row.daysRankedPct !== null ? (
-                            <div className="flex flex-col items-center gap-0.5">
-                              <span className={`text-xs font-semibold ${pctColor(row.daysRankedPct)}`}>
-                                {row.daysRankedPct}%
-                              </span>
-                              <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{row.daysRanked}/{row.totalDays}d</span>
-                              <div className="w-12 h-1 rounded-full overflow-hidden" style={{ background: 'var(--color-border)' }}>
-                                <div className="h-full rounded-full bg-[#232323]" style={{ width: `${Math.min(100, row.daysRankedPct)}%` }} />
-                              </div>
-                            </div>
-                          ) : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
-                        </td>
-                        <td className="px-4 py-2.5 text-center">
-                          <span className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-xs ${severityBadge(row.cannibalizationCount)}`}>{row.cannibalizationCount}</span>
-                        </td>
-                        {csvUploaded && (
-                          <>
-                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.referringDomains !== null ? row.referringDomains.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
-                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.totalKeywords !== null ? row.totalKeywords.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
-                          </>
-                        )}
-                        {activeEvent && (
-                          <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                            {row.keyEvents?.[activeEvent] !== undefined ? <span className="font-semibold">{row.keyEvents[activeEvent].toLocaleString()}</span> : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
-                          </td>
-                        )}
-                        <td className="px-4 py-2 min-w-[160px]">
-                          <input type="text" value={row.notes} onChange={e => handleNotesChange(keyword, row.url, e.target.value)} placeholder="Add note..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
-                        </td>
-                        <td className="px-4 py-2 min-w-[150px]">
-                          <div className="relative">
-                            <select value={row.recommendation} onChange={e => handleRecChange(row.url, e.target.value as Recommendation)} className={`w-full appearance-none rounded-lg px-3 py-1.5 text-xs font-medium cursor-pointer outline-none pr-7 ${REC_STYLES[row.recommendation]}`}>
-                              {RECOMMENDATIONS.map(r => <option key={r} value={r}>{r || 'Set rec...'}</option>)}
-                            </select>
-                            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none opacity-40" />
-                          </div>
-                        </td>
+            {cannibalGroups.length === 0 ? (
+              <div className="text-center py-12" style={{ color: 'var(--color-text-muted)' }}>
+                <p className="text-sm">No cannibalizing keywords found yet. Complete Steps 1 and 2 to see results.</p>
+              </div>
+            ) : (
+              <>
+                <div className="rounded-xl border overflow-auto" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
+                  <table className="w-full text-sm" style={{ minWidth: '900px' }}>
+                    <thead>
+                      <tr style={{ background: 'var(--color-surface)', borderBottom: '2px solid var(--color-border-strong)' }}>
+                        {[
+                          'Keyword', 'URL', 'Avg Pos', 'Clicks', 'Days Ranked', 'URLs Competing',
+                          ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
+                          ...(activeEvent ? [activeEvent] : []),
+                          'Notes', 'Rec', '',
+                        ].map(h => (
+                          <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>{h}</th>
+                        ))}
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
+                    </thead>
+                    <tbody>
+                      {cannibalGroups.map(([keyword, kwRows]) =>
+                        kwRows.map((row, i) => (
+                          <tr
+                            key={`${keyword}-${row.url}-${i}`}
+                            /* #7: stronger group dividers */
+                            style={{ borderBottom: '1px solid var(--color-border)', borderTop: i === 0 ? '3px solid #232323' : undefined }}
+                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-row-hover)')}
+                            onMouseLeave={e => (e.currentTarget.style.background = '')}
+                          >
+                            {/* #8: keyword on every row */}
+                            <td className="px-4 py-2.5 font-semibold max-w-[180px]" style={{ color: 'var(--color-text)' }}>
+                              <span className="line-clamp-2 text-sm">{keyword}</span>
+                            </td>
+                            {/* #4: URL same dark color */}
+                            <td className="px-4 py-2.5 font-mono text-xs max-w-[220px]" style={{ color: 'var(--color-text)' }}>
+                              <span className="truncate block" title={row.url}>/{row.url.split('/').slice(1).join('/')}</span>
+                            </td>
+                            {/* #4: position plain dark, rounded to 1 decimal */}
+                            <td className="px-4 py-2.5 text-center text-sm font-mono" style={{ color: 'var(--color-text)' }}>
+                              {row.position}
+                            </td>
+                            {/* #4: clicks plain dark */}
+                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                              {row.clicks.toLocaleString()}
+                            </td>
+                            <td className="px-4 py-2.5 text-center whitespace-nowrap">
+                              {row.daysRankedPct !== null ? (
+                                <div className="flex flex-col items-center gap-0.5">
+                                  <span className={`text-xs font-semibold ${pctColor(row.daysRankedPct)}`}>
+                                    {row.daysRankedPct}%
+                                  </span>
+                                  <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{row.daysRanked}/{row.totalDays}d</span>
+                                  <div className="w-12 h-1 rounded-full overflow-hidden" style={{ background: 'var(--color-border)' }}>
+                                    <div className="h-full rounded-full bg-[#232323]" style={{ width: `${Math.min(100, row.daysRankedPct)}%` }} />
+                                  </div>
+                                </div>
+                              ) : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
+                            </td>
+                            {/* #6: cannibal count plain text, no bubble */}
+                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                              {row.cannibalizationCount}
+                            </td>
+                            {/* #5: ref domains and total keywords */}
+                            {csvUploaded && (
+                              <>
+                                <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.referringDomains !== null ? row.referringDomains.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
+                                <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.totalKeywords !== null ? row.totalKeywords.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
+                              </>
+                            )}
+                            {activeEvent && (
+                              <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                                {row.keyEvents?.[activeEvent] !== undefined ? row.keyEvents[activeEvent].toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
+                              </td>
+                            )}
+                            <td className="px-4 py-2 min-w-[140px]">
+                              <input type="text" value={row.notes} onChange={e => handleNotesChange(keyword, row.url, e.target.value)} placeholder="Add note..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
+                            </td>
+                            <td className="px-4 py-2 min-w-[130px]">
+                              <div className="relative">
+                                <select value={row.recommendation} onChange={e => handleRecChange(row.url, e.target.value as Recommendation)} className={`w-full appearance-none rounded-lg px-2 py-1.5 text-xs font-medium cursor-pointer outline-none pr-6 ${REC_STYLES[row.recommendation]}`}>
+                                  {RECOMMENDATIONS.map(r => <option key={r} value={r}>{r || 'Set rec...'}</option>)}
+                                </select>
+                                <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none opacity-40" />
+                              </div>
+                            </td>
+                            {/* #9: delete row */}
+                            <td className="px-2 py-2">
+                              <button onClick={() => handleDeleteRow(keyword, row.url)} className="opacity-30 hover:opacity-100 transition-opacity" title="Remove this URL">
+                                <X className="w-3.5 h-3.5" style={{ color: 'var(--color-text)' }} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* #10: Save audit */}
+                {supabase && (
+                  <div className="flex items-center gap-3 pt-4">
+                    <input type="text" value={auditName} onChange={e => setAuditName(e.target.value)} placeholder="Audit name (e.g. Rho Q1 2026)" className="px-3 py-2 text-sm rounded-lg outline-none max-w-[260px] w-full" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }} />
+                    <button onClick={handleSaveAudit} disabled={saving || !auditName.trim()} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50" style={{ background: '#232323', color: '#fff' }}>
+                      <Save className="w-4 h-4" />
+                      {saving ? 'Saving...' : 'Save Audit'}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
       </div>

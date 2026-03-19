@@ -8,10 +8,6 @@ function normalizeUrl(url: string): string {
     .toLowerCase()
 }
 
-/**
- * Build audit rows from GSC data, filtered to Ahrefs keyword list.
- * Shows ALL keywords from Ahrefs CSV — even if GSC only found 1 URL or 0.
- */
 export function buildAuditRows(
   keywordUrlData: Record<string, { clicks: number; position: number }>,
   daysMap: Record<string, number>,
@@ -27,36 +23,22 @@ export function buildAuditRows(
   for (const [key, data] of Object.entries(keywordUrlData)) {
     const [keyword, normUrl] = key.split('||')
     const kwLower = keyword.toLowerCase().trim()
-
     if (!keywordSet.has(kwLower)) continue
 
     if (!keywordUrls[keyword]) keywordUrls[keyword] = []
     keywordUrls[keyword].push({
       url: normUrl,
       clicks: data.clicks,
-      position: data.position,
+      position: Math.round(data.position * 10) / 10,
       daysRanked: daysMap[key] ?? null,
     })
   }
 
-  // Also add keywords from Ahrefs that GSC had no data for
-  for (const kw of ahrefsKeywords) {
-    const kwLower = kw.toLowerCase().trim()
-    // Check if we already have this keyword (case-insensitive)
-    const found = Object.keys(keywordUrls).some(k => k.toLowerCase().trim() === kwLower)
-    if (!found) {
-      keywordUrls[kw] = [] // empty — no GSC data
-    }
-  }
-
+  // #1: Only keep keywords with 2+ URLs (true cannibalization)
   const rows: AuditRow[] = []
   for (const [keyword, urls] of Object.entries(keywordUrls)) {
-    if (urls.length === 0) {
-      // Keyword from Ahrefs but no GSC data — skip it, will show in stats
-      continue
-    }
+    if (urls.length < 2) continue
 
-    // Sort by position ascending
     urls.sort((a, b) => a.position - b.position)
 
     for (const u of urls) {
@@ -79,22 +61,14 @@ export function buildAuditRows(
     }
   }
 
-  // Sort: keywords with 2+ URLs first (real cannibalization), then by total clicks desc
-  const kwOrder: Record<string, { totalClicks: number; urlCount: number }> = {}
+  // Sort by total clicks desc within keyword groups
+  const kwOrder: Record<string, number> = {}
   for (const row of rows) {
-    if (!kwOrder[row.keyword]) kwOrder[row.keyword] = { totalClicks: 0, urlCount: 0 }
-    kwOrder[row.keyword].totalClicks += row.clicks
-    kwOrder[row.keyword].urlCount = Math.max(kwOrder[row.keyword].urlCount, row.cannibalizationCount)
+    kwOrder[row.keyword] = (kwOrder[row.keyword] || 0) + row.clicks
   }
   rows.sort((a, b) => {
-    const aOrder = kwOrder[a.keyword]
-    const bOrder = kwOrder[b.keyword]
-    // 2+ URLs first
-    const aMulti = aOrder.urlCount >= 2 ? 1 : 0
-    const bMulti = bOrder.urlCount >= 2 ? 1 : 0
-    if (bMulti !== aMulti) return bMulti - aMulti
-    // Then by total clicks
-    if (bOrder.totalClicks !== aOrder.totalClicks) return bOrder.totalClicks - aOrder.totalClicks
+    if (kwOrder[b.keyword] !== kwOrder[a.keyword]) return (kwOrder[b.keyword] || 0) - (kwOrder[a.keyword] || 0)
+    if (a.keyword !== b.keyword) return a.keyword.localeCompare(b.keyword)
     return a.position - b.position
   })
 
