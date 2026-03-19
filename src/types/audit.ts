@@ -12,17 +12,32 @@ export interface AuditRow {
   url: string
   position: number
   daysRanked: number | null
+  daysRankedPct: number | null
   totalDays: number
   volume: number | null
-  traffic: number
+  traffic: number | null
   cannibalizationCount: number
   referringDomains: number | null
   totalKeywords: number | null
-  clicks6m: number | null
-  avgMonthlyClicks: number | null
   keyEvents: Record<string, number> | null
   notes: string
   recommendation: Recommendation
+}
+
+export interface AhrefsPosition {
+  url: string
+  position: number
+  kind: string
+}
+
+export interface AhrefsKeywordRow {
+  keyword: string
+  volume: number | null
+  sum_traffic: number | null
+  best_position: number | null
+  best_position_url: string | null
+  serp_target_main_positions_count: number
+  all_positions: AhrefsPosition[]
 }
 
 export interface TopPageRow {

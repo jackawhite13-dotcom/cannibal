@@ -1,11 +1,10 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { useSession, signIn, signOut } from 'next-auth/react'
-import { AuditRow, Recommendation, TopPageRow, GscSite } from '@/types/audit'
-import { buildAuditRowsFromGsc, syncRecommendation } from '@/lib/buildAuditRows'
-import { parseTopPagesCsv } from '@/lib/parseTopPages'
-import { Upload, Download, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, ChevronRight } from 'lucide-react'
+import { AuditRow, Recommendation, GscSite } from '@/types/audit'
+import { buildAuditRowsFromAhrefs, enrichWithGscDays, syncRecommendation } from '@/lib/buildAuditRows'
+import { Download, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, ChevronRight } from 'lucide-react'
 
 type WizardStep = 1 | 2 | 3 | 4
 
@@ -37,6 +36,12 @@ const positionColor = (pos: number) => {
   return 'text-red-400'
 }
 
+const pctColor = (pct: number) => {
+  if (pct >= 75) return 'text-green-700'
+  if (pct >= 40) return 'text-amber-600'
+  return 'text-red-400'
+}
+
 interface Ga4Property { propertyId: string; displayName: string }
 
 const DATE_RANGES = [
@@ -45,7 +50,18 @@ const DATE_RANGES = [
   { label: '6 months', value: 180 },
 ]
 
-const COUNTRIES = [
+const AHREFS_COUNTRIES = [
+  { label: 'All countries', value: '' },
+  { label: 'United States', value: 'US' },
+  { label: 'United Kingdom', value: 'GB' },
+  { label: 'Canada', value: 'CA' },
+  { label: 'Australia', value: 'AU' },
+  { label: 'Germany', value: 'DE' },
+  { label: 'France', value: 'FR' },
+  { label: 'India', value: 'IN' },
+]
+
+const GSC_COUNTRIES = [
   { label: 'All countries', value: '' },
   { label: 'United States', value: 'US' },
   { label: 'United Kingdom', value: 'UK' },
@@ -56,20 +72,42 @@ const COUNTRIES = [
   { label: 'India', value: 'IN' },
 ]
 
+const GA4_CHANNELS = [
+  { label: 'All channels', value: '' },
+  { label: 'Organic Search', value: 'Organic Search' },
+  { label: 'Paid Search', value: 'Paid Search' },
+  { label: 'Direct', value: 'Direct' },
+  { label: 'Referral', value: 'Referral' },
+  { label: 'Organic Social', value: 'Organic Social' },
+  { label: 'Paid Social', value: 'Paid Social' },
+  { label: 'Email', value: 'Email' },
+  { label: 'Display', value: 'Display' },
+]
+
 export default function Home() {
   const { data: session, status } = useSession()
   const [wizardStep, setWizardStep] = useState<WizardStep>(1)
 
-  // Step 1 — GSC
+  // Step 1 — Ahrefs
+  const [domain, setDomain] = useState('')
+  const [ahrefsCountry, setAhrefsCountry] = useState('US')
+  const [positionMin, setPositionMin] = useState<string>('')
+  const [positionMax, setPositionMax] = useState<string>('')
+  const [brandExclusion, setBrandExclusion] = useState('')
+  const [rows, setRows] = useState<AuditRow[]>([])
+  const [ahrefsLoading, setAhrefsLoading] = useState(false)
+  const [ahrefsError, setAhrefsError] = useState<string | null>(null)
+
+  // Step 2 — GSC
   const [sites, setSites] = useState<GscSite[]>([])
   const [selectedSite, setSelectedSite] = useState('')
-  const [dateRange, setDateRange] = useState(180)
-  const [country, setCountry] = useState('')
-  const [rows, setRows] = useState<AuditRow[]>([])
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [gscDateRange, setGscDateRange] = useState(90)
+  const [gscCountry, setGscCountry] = useState('')
+  const [gscLoading, setGscLoading] = useState(false)
+  const [gscError, setGscError] = useState<string | null>(null)
+  const [gscDone, setGscDone] = useState(false)
 
-  // Step 2 — GA4
+  // Step 3 — GA4
   const [ga4Properties, setGa4Properties] = useState<Ga4Property[]>([])
   const [selectedGa4Property, setSelectedGa4Property] = useState('')
   const [ga4EventNames, setGa4EventNames] = useState<string[]>([])
@@ -79,15 +117,13 @@ export default function Home() {
   const [ga4PropertiesLoading, setGa4PropertiesLoading] = useState(false)
   const [ga4Error, setGa4Error] = useState<string | null>(null)
   const [ga4MatchCount, setGa4MatchCount] = useState<number | null>(null)
+  const [ga4DateRange, setGa4DateRange] = useState(90)
+  const [ga4Country, setGa4Country] = useState('')
+  const [ga4ChannelGroup, setGa4ChannelGroup] = useState('')
 
-  // Step 3 — Ahrefs
-  const [topPages, setTopPages] = useState<Record<string, TopPageRow>>({})
-  const [csvUploaded, setCsvUploaded] = useState(false)
-  const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // Load GSC sites on auth
+  // Load GSC sites when authenticated and reaching step 2
   useEffect(() => {
-    if (session?.access_token) {
+    if (wizardStep === 2 && session?.access_token && sites.length === 0) {
       fetch('/api/gsc/sites')
         .then(r => r.json())
         .then(data => {
@@ -97,11 +133,11 @@ export default function Home() {
         })
         .catch(() => {})
     }
-  }, [session])
+  }, [wizardStep, session])
 
-  // Load GA4 properties when reaching step 2
+  // Load GA4 properties when reaching step 3
   useEffect(() => {
-    if (wizardStep === 2 && session?.access_token && ga4Properties.length === 0 && !ga4PropertiesLoading && !ga4Error) {
+    if (wizardStep === 3 && session?.access_token && ga4Properties.length === 0 && !ga4PropertiesLoading && !ga4Error) {
       setGa4PropertiesLoading(true)
       fetch('/api/ga4/properties')
         .then(r => r.json())
@@ -142,33 +178,69 @@ export default function Home() {
     return acc
   }, {} as Record<string, AuditRow[]>)
 
-  async function handlePull() {
-    if (!selectedSite) return
-    setIsLoading(true)
-    setError(null)
+  // Step 1: Ahrefs pull
+  async function handleAhrefsPull() {
+    if (!domain.trim()) return
+    setAhrefsLoading(true)
+    setAhrefsError(null)
     setRows([])
+    setGscDone(false)
     try {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 90000)
-      const res = await fetch('/api/gsc/query', {
+      const body: Record<string, unknown> = { domain: domain.trim() }
+      if (ahrefsCountry) body.country = ahrefsCountry
+      if (positionMin) body.positionMin = parseInt(positionMin)
+      if (positionMax) body.positionMax = parseInt(positionMax)
+      if (brandExclusion.trim()) body.brandExclusion = brandExclusion.trim()
+
+      const res = await fetch('/api/ahrefs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ siteUrl: selectedSite, dateRange, country }),
-        signal: controller.signal,
+        body: JSON.stringify(body),
       })
-      clearTimeout(timer)
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to fetch GSC data')
-      const built = buildAuditRowsFromGsc(data.keywords || [], topPages, data.totalDays)
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch Ahrefs data')
+
+      const ahrefsRows = data.keywords || data.rows || []
+      const built = buildAuditRowsFromAhrefs(ahrefsRows)
+      if (built.length === 0) {
+        setAhrefsError('No cannibalizing keywords found with these filters. Try widening your position range or removing the brand filter.')
+        return
+      }
       setRows(built)
       setWizardStep(2)
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Unknown error')
+      setAhrefsError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
-      setIsLoading(false)
+      setAhrefsLoading(false)
     }
   }
 
+  // Step 2: GSC days ranked
+  async function handleGscEnrich() {
+    if (!selectedSite) return
+    setGscLoading(true)
+    setGscError(null)
+    try {
+      const res = await fetch('/api/gsc/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteUrl: selectedSite, dateRange: gscDateRange, country: gscCountry }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch GSC data')
+
+      const daysMap: Record<string, number> = data.daysMap || {}
+      setRows(prev => enrichWithGscDays(prev, daysMap, data.totalDays))
+      setGscDone(true)
+      setWizardStep(3)
+    } catch (e: unknown) {
+      setGscError(e instanceof Error ? e.message : 'Unknown error')
+    } finally {
+      setGscLoading(false)
+    }
+  }
+
+  // Step 3: GA4 events
   async function handleAddEvents() {
     if (!selectedGa4Property || !selectedEvent) return
     setGa4Loading(true)
@@ -176,7 +248,13 @@ export default function Home() {
       const res = await fetch('/api/ga4/events', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ propertyId: selectedGa4Property, eventName: selectedEvent }),
+        body: JSON.stringify({
+          propertyId: selectedGa4Property,
+          eventName: selectedEvent,
+          dateRange: ga4DateRange,
+          country: ga4Country || undefined,
+          channelGroup: ga4ChannelGroup || undefined,
+        }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error))
@@ -190,31 +268,12 @@ export default function Home() {
         return { ...row, keyEvents: count !== null ? { ...(row.keyEvents || {}), [selectedEvent]: count } : row.keyEvents }
       }))
       setGa4MatchCount(matched)
-      setWizardStep(3)
+      setWizardStep(4)
     } catch (e: unknown) {
       setGa4Error(e instanceof Error ? e.message : 'Unknown error')
     } finally {
       setGa4Loading(false)
     }
-  }
-
-  function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = (ev) => {
-      const text = ev.target?.result as string
-      const { map: parsed } = parseTopPagesCsv(text)
-      setTopPages(parsed)
-      setCsvUploaded(true)
-      if (rows.length > 0) {
-        setRows(prev => prev.map(row => {
-          const tp = parsed[row.url.replace(/\/$/, '')]
-          return tp ? { ...row, referringDomains: tp.referringDomains, totalKeywords: tp.totalKeywords } : row
-        }))
-      }
-    }
-    reader.readAsText(file)
   }
 
   function handleRecChange(url: string, rec: Recommendation) {
@@ -229,17 +288,15 @@ export default function Home() {
 
   function handleExportCsv() {
     const eventHeader = activeEvent ? `Event: ${activeEvent}` : 'Key Events'
-    const headers = ['Keyword', 'URL', 'Position', 'Days Ranked', 'Cannibalization Count',
-      ...(csvUploaded ? ['Referring Domains', 'Total Keywords'] : []),
-      'Clicks 6mo', 'Avg Monthly Clicks',
+    const headers = ['Keyword', 'URL', 'Position', 'Volume', 'Traffic', 'Days Ranked', 'Days Ranked %', 'Cannibal Count',
       ...(activeEvent ? [eventHeader] : []),
       'Notes', 'Recommendation']
     const csvRows = rows.map(r => [
       r.keyword, r.url, r.position,
+      r.volume ?? '', r.traffic ?? '',
       r.daysRanked !== null ? `${r.daysRanked}/${r.totalDays}` : '',
+      r.daysRankedPct !== null ? `${r.daysRankedPct}%` : '',
       r.cannibalizationCount,
-      ...(csvUploaded ? [r.referringDomains ?? '', r.totalKeywords ?? ''] : []),
-      r.clicks6m ?? '', r.avgMonthlyClicks ?? '',
       ...(activeEvent ? [r.keyEvents?.[activeEvent] !== undefined ? r.keyEvents[activeEvent] : ''] : []),
       r.notes, r.recommendation,
     ])
@@ -248,7 +305,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `cannibal-audit-${selectedSite.replace(/https?:\/\//, '')}-${new Date().toISOString().split('T')[0]}.csv`
+    a.download = `cannibal-audit-${domain}-${new Date().toISOString().split('T')[0]}.csv`
     a.click()
   }
 
@@ -257,17 +314,40 @@ export default function Home() {
 
   const stepDone = (s: WizardStep) => {
     if (s === 1) return rows.length > 0
-    if (s === 2) return !!activeEvent
-    if (s === 3) return csvUploaded
+    if (s === 2) return gscDone
+    if (s === 3) return !!activeEvent
     return false
   }
 
   const stepLabel = (s: WizardStep) => {
-    if (s === 1) return 'Search Console'
-    if (s === 2) return 'GA4 Key Events'
-    if (s === 3) return 'Ahrefs Data'
+    if (s === 1) return 'Ahrefs Data'
+    if (s === 2) return 'Days Ranked (GSC)'
+    if (s === 3) return 'GA4 Key Events'
     return 'Audit'
   }
+
+  const stepSummary = (s: WizardStep) => {
+    if (s === 1) return `${domain} · ${uniqueKeywordCount} keywords · ${uniqueUrlCount} URLs`
+    if (s === 2) return gscDone ? `${gscDateRange}d · ${gscCountry || 'Global'}` : 'Skipped'
+    if (s === 3) return activeEvent ? `${activeEvent} · ${ga4MatchCount ?? 0} URLs matched` : 'Skipped'
+    return ''
+  }
+
+  // Dropdown helper
+  const SelectField = ({ label, value, onChange, options, maxW = 'max-w-[220px]' }: {
+    label: string; value: string; onChange: (v: string) => void;
+    options: { label: string; value: string }[]; maxW?: string
+  }) => (
+    <div>
+      <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>{label}</label>
+      <div className={`relative ${maxW}`}>
+        <select value={value} onChange={e => onChange(e.target.value)} className="w-full appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
+          {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+        <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
+      </div>
+    </div>
+  )
 
   return (
     <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
@@ -299,6 +379,7 @@ export default function Home() {
                 {stepDone(s) ? <Check className="w-3 h-3" /> : s}
               </span>
               <span className="flex-1">{stepLabel(s)}</span>
+              {s === 1 && <span className="text-[9px] opacity-40 uppercase tracking-wide">req</span>}
               {s !== 1 && <span className="text-[9px] opacity-40 uppercase tracking-wide">opt</span>}
             </button>
           ))}
@@ -344,89 +425,169 @@ export default function Home() {
 
         <div className="px-8 py-6 space-y-4 max-w-3xl">
 
-          {/* Not signed in */}
-          {status !== 'authenticated' && (
-            <div className="card">
-              <p className="text-sm font-medium mb-1" style={{ color: 'var(--color-text)' }}>Connect your Google account to get started</p>
-              <p className="text-xs mb-4" style={{ color: 'var(--color-text-muted)' }}>Required for Google Search Console and GA4 access</p>
-              <button onClick={() => signIn('google')} disabled={status === 'loading'} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50" style={{ background: '#232323', color: '#fff' }}>
-                <LogIn className="w-4 h-4" /> Connect Google Account
-              </button>
-            </div>
-          )}
-
-          {/* ── STEP 1: GSC ── */}
-          {status === 'authenticated' && wizardStep === 1 && (
+          {/* ── STEP 1: Ahrefs ── */}
+          {wizardStep === 1 && (
             <div className="card">
               <div className="flex items-center gap-2 mb-5">
                 <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center text-xs font-bold">1</span>
-                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Search Console</h2>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Ahrefs Data</h2>
                 <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: '#232323', color: '#fff' }}>Required</span>
               </div>
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>GSC Property</label>
-                  <div className="relative max-w-sm">
-                    <select value={selectedSite} onChange={e => setSelectedSite(e.target.value)} className="w-full appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
-                      {sites.map(s => <option key={s.siteUrl} value={s.siteUrl}>{s.siteUrl}</option>)}
-                      {sites.length === 0 && <option>No properties found</option>}
-                    </select>
-                    <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
+                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Domain</label>
+                  <input
+                    type="text"
+                    value={domain}
+                    onChange={e => setDomain(e.target.value)}
+                    placeholder="example.com"
+                    className="max-w-sm w-full px-3 py-2 text-sm rounded-lg outline-none"
+                    style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
+                    onKeyDown={e => e.key === 'Enter' && handleAhrefsPull()}
+                  />
+                </div>
+
+                <SelectField label="Country" value={ahrefsCountry} onChange={setAhrefsCountry} options={AHREFS_COUNTRIES} />
+
+                <div>
+                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Position Range <span className="font-normal">(optional)</span></label>
+                  <div className="flex items-center gap-2 max-w-[220px]">
+                    <input type="number" value={positionMin} onChange={e => setPositionMin(e.target.value)} placeholder="1" min={1} max={100} className="w-20 px-3 py-2 text-sm rounded-lg outline-none" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }} />
+                    <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>to</span>
+                    <input type="number" value={positionMax} onChange={e => setPositionMax(e.target.value)} placeholder="100" min={1} max={100} className="w-20 px-3 py-2 text-sm rounded-lg outline-none" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }} />
                   </div>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Date Range</label>
-                  <div className="flex gap-2">
-                    {DATE_RANGES.map(d => (
-                      <button key={d.value} onClick={() => setDateRange(d.value)} className="px-4 py-2 text-sm rounded-lg border transition-colors" style={dateRange === d.value ? { background: '#232323', color: '#fff', borderColor: '#232323' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
-                        {d.label}
-                      </button>
-                    ))}
-                  </div>
+                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Exclude Branded Terms <span className="font-normal">(optional)</span></label>
+                  <input
+                    type="text"
+                    value={brandExclusion}
+                    onChange={e => setBrandExclusion(e.target.value)}
+                    placeholder="e.g. your brand name"
+                    className="max-w-sm w-full px-3 py-2 text-sm rounded-lg outline-none"
+                    style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
+                  />
                 </div>
 
-                <div>
-                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Country</label>
-                  <div className="relative max-w-[220px]">
-                    <select value={country} onChange={e => setCountry(e.target.value)} className="w-full appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
-                      {COUNTRIES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
-                    </select>
-                    <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
-                  </div>
-                </div>
-
-                <button onClick={handlePull} disabled={isLoading || !selectedSite} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
-                  <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-                  {isLoading ? 'Pulling data...' : 'Pull Data'}
+                <button onClick={handleAhrefsPull} disabled={ahrefsLoading || !domain.trim()} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
+                  <RefreshCw className={`w-4 h-4 ${ahrefsLoading ? 'animate-spin' : ''}`} />
+                  {ahrefsLoading ? 'Pulling data...' : 'Pull Cannibalizing Keywords'}
                 </button>
 
-                {error && <div className="px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{error}</div>}
+                {ahrefsError && <div className="px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{ahrefsError}</div>}
               </div>
             </div>
           )}
 
-          {/* Step 1 summary (shown on steps 2/3/4) */}
-          {status === 'authenticated' && rows.length > 0 && wizardStep > 1 && (
+          {/* Step 1 summary */}
+          {rows.length > 0 && wizardStep > 1 && (
             <button onClick={() => setWizardStep(1)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
               <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center flex-shrink-0"><Check className="w-3 h-3" /></span>
-              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 1 — Search Console</span>
-              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{selectedSite} · {rows.length.toLocaleString()} rows</span>
+              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 1 — Ahrefs</span>
+              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{stepSummary(1)}</span>
               <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
             </button>
           )}
 
-          {/* ── STEP 2: GA4 ── */}
-          {status === 'authenticated' && wizardStep === 2 && (
+          {/* ── STEP 2: GSC Days Ranked ── */}
+          {wizardStep === 2 && (
             <div className="card">
               <div className="flex items-center gap-2 mb-5">
                 <span className="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold" style={{ borderColor: '#232323', color: '#232323' }}>2</span>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Days Ranked (Search Console)</h2>
+                <span className="text-[10px] px-2 py-0.5 rounded-full border font-medium" style={{ borderColor: 'var(--color-border-strong)', color: 'var(--color-text-muted)' }}>Optional</span>
+              </div>
+
+              <p className="text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
+                Shows what percentage of days each keyword-URL pair actually appeared in Google search results.
+              </p>
+
+              {status !== 'authenticated' ? (
+                <div>
+                  <p className="text-sm mb-3" style={{ color: 'var(--color-text-muted)' }}>Sign in with Google to access Search Console data.</p>
+                  <button onClick={() => signIn('google')} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
+                    <LogIn className="w-4 h-4" /> Connect Google Account
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>GSC Property</label>
+                    <div className="relative max-w-sm">
+                      <select value={selectedSite} onChange={e => setSelectedSite(e.target.value)} className="w-full appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
+                        {sites.map(s => <option key={s.siteUrl} value={s.siteUrl}>{s.siteUrl}</option>)}
+                        {sites.length === 0 && <option>Loading properties...</option>}
+                      </select>
+                      <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Time Period</label>
+                    <div className="flex gap-2">
+                      {DATE_RANGES.map(d => (
+                        <button key={d.value} onClick={() => setGscDateRange(d.value)} className="px-4 py-2 text-sm rounded-lg border transition-colors" style={gscDateRange === d.value ? { background: '#232323', color: '#fff', borderColor: '#232323' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+                          {d.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <SelectField label="Country" value={gscCountry} onChange={setGscCountry} options={GSC_COUNTRIES} />
+
+                  <button onClick={handleGscEnrich} disabled={gscLoading || !selectedSite} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
+                    <RefreshCw className={`w-4 h-4 ${gscLoading ? 'animate-spin' : ''}`} />
+                    {gscLoading ? 'Enriching data...' : 'Add Days Ranked'}
+                  </button>
+
+                  {gscError && <div className="px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{gscError}</div>}
+                </div>
+              )}
+
+              <div className="mt-5 pt-4 border-t flex items-center justify-between" style={{ borderColor: 'var(--color-border)' }}>
+                <button onClick={() => setWizardStep(3)} className="text-sm hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>
+                  Skip this step →
+                </button>
+                {gscDone && (
+                  <button onClick={() => setWizardStep(3)} className="flex items-center gap-1 text-sm font-medium" style={{ color: '#232323' }}>
+                    Next: GA4 Events <ChevronRight className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Step 2 summary */}
+          {rows.length > 0 && wizardStep > 2 && (
+            <button onClick={() => setWizardStep(2)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
+              <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: gscDone ? '#232323' : 'var(--color-border-strong)', color: gscDone ? '#fff' : 'var(--color-text)' }}>
+                {gscDone ? <Check className="w-3 h-3" /> : <span className="text-xs">2</span>}
+              </span>
+              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 2 — Days Ranked</span>
+              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{stepSummary(2)}</span>
+              <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
+            </button>
+          )}
+
+          {/* ── STEP 3: GA4 ── */}
+          {wizardStep === 3 && (
+            <div className="card">
+              <div className="flex items-center gap-2 mb-5">
+                <span className="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold" style={{ borderColor: '#232323', color: '#232323' }}>3</span>
                 <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>GA4 Key Events</h2>
                 <span className="text-[10px] px-2 py-0.5 rounded-full border font-medium" style={{ borderColor: 'var(--color-border-strong)', color: 'var(--color-text-muted)' }}>Optional</span>
               </div>
 
-              {ga4PropertiesLoading ? (
+              {status !== 'authenticated' ? (
+                <div>
+                  <p className="text-sm mb-3" style={{ color: 'var(--color-text-muted)' }}>Sign in with Google to access GA4 data.</p>
+                  <button onClick={() => signIn('google')} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
+                    <LogIn className="w-4 h-4" /> Connect Google Account
+                  </button>
+                </div>
+              ) : ga4PropertiesLoading ? (
                 <div className="flex items-center gap-2 text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
                   <RefreshCw className="w-4 h-4 animate-spin" /> Loading GA4 properties...
                 </div>
@@ -455,6 +616,22 @@ export default function Home() {
                       </div>
                     </div>
                   </div>
+
+                  <div className="flex gap-3 flex-wrap">
+                    <div>
+                      <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Time Period</label>
+                      <div className="flex gap-2">
+                        {DATE_RANGES.map(d => (
+                          <button key={d.value} onClick={() => setGa4DateRange(d.value)} className="px-3 py-1.5 text-xs rounded-lg border transition-colors" style={ga4DateRange === d.value ? { background: '#232323', color: '#fff', borderColor: '#232323' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+                            {d.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <SelectField label="Country" value={ga4Country} onChange={setGa4Country} options={[{ label: 'All countries', value: '' }, { label: 'United States', value: 'United States' }, { label: 'United Kingdom', value: 'United Kingdom' }, { label: 'Canada', value: 'Canada' }, { label: 'Australia', value: 'Australia' }, { label: 'Germany', value: 'Germany' }, { label: 'France', value: 'France' }, { label: 'India', value: 'India' }]} />
+                    <SelectField label="Channel" value={ga4ChannelGroup} onChange={setGa4ChannelGroup} options={GA4_CHANNELS} />
+                  </div>
+
                   <button onClick={handleAddEvents} disabled={ga4Loading || !selectedEvent} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
                     <RefreshCw className={`w-4 h-4 ${ga4Loading ? 'animate-spin' : ''}`} />
                     {ga4Loading ? 'Loading events...' : 'Add Events'}
@@ -463,77 +640,38 @@ export default function Home() {
               ) : null}
 
               <div className="mt-5 pt-4 border-t flex items-center justify-between" style={{ borderColor: 'var(--color-border)' }}>
-                <button onClick={() => setWizardStep(3)} className="text-sm hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>
+                <button onClick={() => setWizardStep(4)} className="text-sm hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>
                   Skip this step →
                 </button>
                 {activeEvent && (
-                  <button onClick={() => setWizardStep(3)} className="flex items-center gap-1 text-sm font-medium" style={{ color: '#232323' }}>
-                    Next: Ahrefs Data <ChevronRight className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Step 2 summary */}
-          {status === 'authenticated' && rows.length > 0 && wizardStep > 2 && (
-            <button onClick={() => setWizardStep(2)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
-              <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: activeEvent ? '#232323' : 'var(--color-border-strong)', color: activeEvent ? '#fff' : 'var(--color-text)' }}>
-                {activeEvent ? <Check className="w-3 h-3" /> : <span className="text-xs">2</span>}
-              </span>
-              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 2 — GA4 Key Events</span>
-              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
-                {activeEvent ? `${activeEvent} · ${ga4MatchCount ?? 0} URLs matched` : 'Skipped'}
-              </span>
-              <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
-            </button>
-          )}
-
-          {/* ── STEP 3: Ahrefs ── */}
-          {status === 'authenticated' && wizardStep === 3 && (
-            <div className="card">
-              <div className="flex items-center gap-2 mb-5">
-                <span className="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold" style={{ borderColor: '#232323', color: '#232323' }}>3</span>
-                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Ahrefs Data</h2>
-                <span className="text-[10px] px-2 py-0.5 rounded-full border font-medium" style={{ borderColor: 'var(--color-border-strong)', color: 'var(--color-text-muted)' }}>Optional</span>
-              </div>
-
-              <p className="text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
-                Upload an Ahrefs Top Pages CSV to add Referring Domains and Total Keywords to each URL.
-                <br /><span className="text-xs mt-1 block">In Ahrefs: Site Explorer → Top Pages → Export CSV</span>
-              </p>
-
-              <div className="flex items-center gap-3">
-                <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium border transition-colors" style={csvUploaded ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
-                  <Upload className="w-4 h-4" />
-                  {csvUploaded ? 'CSV Loaded ✓' : 'Upload Ahrefs CSV'}
-                </button>
-                <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={handleCsvUpload} />
-                {csvUploaded && (
                   <button onClick={() => setWizardStep(4)} className="flex items-center gap-1 text-sm font-medium" style={{ color: '#232323' }}>
                     View Audit <ChevronRight className="w-4 h-4" />
                   </button>
                 )}
               </div>
-
-              <div className="mt-5 pt-4 border-t" style={{ borderColor: 'var(--color-border)' }}>
-                <button onClick={() => setWizardStep(4)} className="text-sm hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>
-                  Skip this step →
-                </button>
-              </div>
             </div>
           )}
 
           {/* Step 3 summary */}
-          {status === 'authenticated' && rows.length > 0 && wizardStep === 4 && (
-            <button onClick={() => setWizardStep(3)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
-              <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: csvUploaded ? '#232323' : 'var(--color-border-strong)', color: csvUploaded ? '#fff' : 'var(--color-text)' }}>
-                {csvUploaded ? <Check className="w-3 h-3" /> : <span className="text-xs">3</span>}
-              </span>
-              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 3 — Ahrefs Data</span>
-              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{csvUploaded ? 'CSV loaded' : 'Skipped'}</span>
-              <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
-            </button>
+          {rows.length > 0 && wizardStep === 4 && (
+            <>
+              <button onClick={() => setWizardStep(2)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
+                <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: gscDone ? '#232323' : 'var(--color-border-strong)', color: gscDone ? '#fff' : 'var(--color-text)' }}>
+                  {gscDone ? <Check className="w-3 h-3" /> : <span className="text-xs">2</span>}
+                </span>
+                <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 2 — Days Ranked</span>
+                <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{stepSummary(2)}</span>
+                <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
+              </button>
+              <button onClick={() => setWizardStep(3)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
+                <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: activeEvent ? '#232323' : 'var(--color-border-strong)', color: activeEvent ? '#fff' : 'var(--color-text)' }}>
+                  {activeEvent ? <Check className="w-3 h-3" /> : <span className="text-xs">3</span>}
+                </span>
+                <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 3 — GA4 Key Events</span>
+                <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{stepSummary(3)}</span>
+                <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
+              </button>
+            </>
           )}
         </div>
 
@@ -560,9 +698,7 @@ export default function Home() {
                 <thead>
                   <tr style={{ background: 'var(--color-surface)', borderBottom: '2px solid var(--color-border-strong)' }}>
                     {[
-                      'Keyword', 'URL', 'Pos', 'Days Ranked', 'Cannibal Count',
-                      ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
-                      'Clicks 6mo', 'Avg/mo',
+                      'Keyword', 'URL', 'Pos', 'Volume', 'Traffic', 'Days Ranked', 'Cannibal Count',
                       ...(activeEvent ? [activeEvent] : []),
                       'Notes', 'Recommendation',
                     ].map(h => (
@@ -588,14 +724,21 @@ export default function Home() {
                         <td className="px-4 py-2.5 text-center">
                           <span className={`text-sm font-mono ${positionColor(row.position)}`}>{row.position}</span>
                         </td>
+                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                          {row.volume !== null ? row.volume.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
+                        </td>
+                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                          {row.traffic !== null ? row.traffic.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
+                        </td>
                         <td className="px-4 py-2.5 text-center whitespace-nowrap">
-                          {row.daysRanked !== null ? (
+                          {row.daysRankedPct !== null ? (
                             <div className="flex flex-col items-center gap-0.5">
-                              <span className="text-xs font-semibold" style={{ color: 'var(--color-text)' }}>
-                                {row.daysRanked}<span className="font-normal text-[10px]" style={{ color: 'var(--color-text-muted)' }}>/{row.totalDays}</span>
+                              <span className={`text-xs font-semibold ${pctColor(row.daysRankedPct)}`}>
+                                {row.daysRankedPct}%
                               </span>
+                              <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{row.daysRanked}/{row.totalDays}d</span>
                               <div className="w-12 h-1 rounded-full overflow-hidden" style={{ background: 'var(--color-border)' }}>
-                                <div className="h-full rounded-full bg-[#232323]" style={{ width: `${Math.min(100, (row.daysRanked / row.totalDays) * 100)}%` }} />
+                                <div className="h-full rounded-full bg-[#232323]" style={{ width: `${Math.min(100, row.daysRankedPct)}%` }} />
                               </div>
                             </div>
                           ) : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
@@ -603,14 +746,6 @@ export default function Home() {
                         <td className="px-4 py-2.5 text-center">
                           <span className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-xs ${severityBadge(row.cannibalizationCount)}`}>{row.cannibalizationCount}</span>
                         </td>
-                        {csvUploaded && (
-                          <>
-                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.referringDomains !== null ? row.referringDomains : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
-                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.totalKeywords !== null ? row.totalKeywords : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
-                          </>
-                        )}
-                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.clicks6m !== null ? row.clicks6m.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
-                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.avgMonthlyClicks !== null ? row.avgMonthlyClicks.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
                         {activeEvent && (
                           <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
                             {row.keyEvents?.[activeEvent] !== undefined ? <span className="font-semibold">{row.keyEvents[activeEvent].toLocaleString()}</span> : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}

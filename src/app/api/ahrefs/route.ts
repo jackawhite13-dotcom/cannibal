@@ -3,7 +3,13 @@ import { NextRequest, NextResponse } from 'next/server'
 const AHREFS_API_BASE = 'https://api.ahrefs.com/v3'
 
 export async function POST(req: NextRequest) {
-  const { domain } = await req.json()
+  const {
+    domain,
+    country = 'US',
+    positionMin,
+    positionMax,
+    brandExclusion = '',
+  } = await req.json()
 
   if (!domain) {
     return NextResponse.json({ error: 'Domain is required' }, { status: 400 })
@@ -16,14 +22,35 @@ export async function POST(req: NextRequest) {
 
   const today = new Date().toISOString().split('T')[0]
 
+  // Build where clause
+  const conditions: object[] = [
+    { field: 'serp_target_main_positions_count', is: ['gt', 1] },
+  ]
+
+  if (country) {
+    conditions.push({ field: 'keyword_country', is: ['eq', country] })
+  }
+
+  if (positionMin != null) {
+    conditions.push({ field: 'best_position', is: ['gte', positionMin] })
+  }
+
+  if (positionMax != null) {
+    conditions.push({ field: 'best_position', is: ['lte', positionMax] })
+  }
+
+  if (brandExclusion.trim()) {
+    conditions.push({ field: 'keyword', is: ['not_substring', brandExclusion.trim().toLowerCase()] })
+  }
+
   const params = new URLSearchParams({
     target: domain,
     mode: 'subdomains',
     date: today,
     select: 'keyword,volume,sum_traffic,best_position,best_position_url,serp_target_main_positions_count,all_positions',
-    where: JSON.stringify({ and: [{ field: 'serp_target_positions_count', is: ['gt', 1] }, { field: 'keyword_country', is: ['eq', 'US'] }] }),
+    where: JSON.stringify({ and: conditions }),
     order_by: 'sum_traffic:desc',
-    limit: '1000',
+    limit: '5000',
     output: 'json',
   })
 
