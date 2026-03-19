@@ -1,7 +1,11 @@
 import { AuditRow, AhrefsKeywordRow } from '@/types/audit'
 
 function normalizeUrl(url: string): string {
-  return url.replace(/\/$/, '').toLowerCase()
+  return url
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '')
+    .toLowerCase()
 }
 
 export function buildAuditRowsFromAhrefs(

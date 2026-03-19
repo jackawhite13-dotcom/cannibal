@@ -19,7 +19,11 @@ async function gscFetch(siteUrl: string, token: string, body: object) {
 }
 
 function normalizeUrl(url: string): string {
-  return url.replace(/\/$/, '').toLowerCase()
+  return url
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/$/, '')
+    .toLowerCase()
 }
 
 export async function POST(req: NextRequest) {
