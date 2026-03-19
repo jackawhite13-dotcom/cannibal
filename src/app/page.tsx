@@ -266,11 +266,7 @@ export default function Home() {
         csvUploaded ? topPages : undefined,
       )
       setRows(built)
-      if (built.length === 0) {
-        setGscError('No cannibalizing keywords found in GSC. The keywords from your Ahrefs export may not match this GSC property, or GSC may not have data for them in this time period.')
-      } else {
-        setWizardStep(3)
-      }
+      setWizardStep(3)
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Unknown error'
       if (msg.includes('abort')) {
@@ -701,9 +697,9 @@ export default function Home() {
           <div className="px-8 pb-8 space-y-4">
             <div className="grid grid-cols-3 gap-3 max-w-xl">
               {[
-                { label: 'Cannibalizing Keywords', value: uniqueKeywordCount, color: '#FFECDB' },
-                { label: 'Affected URLs', value: uniqueUrlCount, color: '#B7EBFF' },
-                { label: 'Total Rows', value: rows.length, color: '#F7E8FD' },
+                { label: 'Total Keywords', value: uniqueKeywordCount, color: '#FFECDB' },
+                { label: 'GSC Confirmed (2+ URLs)', value: Object.values(groupedByKeyword).filter(g => g.length >= 2 && g[0].cannibalizationCount >= 2).length, color: '#B7EBFF' },
+                { label: 'Affected URLs', value: uniqueUrlCount, color: '#F7E8FD' },
               ].map(stat => (
                 <div key={stat.label} className="rounded-xl p-4 border" style={{ background: stat.color, borderColor: 'var(--color-border-strong)' }}>
                   <div className="text-2xl font-bold" style={{ color: 'var(--color-text)' }}>{stat.value.toLocaleString()}</div>
