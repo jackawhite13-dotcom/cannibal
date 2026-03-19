@@ -53,11 +53,12 @@ export async function POST(req: NextRequest) {
     ...(dimensionFilterGroups.length > 0 ? { dimensionFilterGroups } : {}),
   }
 
-  // Paginate through all results
+  // Paginate through results (cap at 3 batches = 75k rows to stay within Vercel timeout)
   const allRows: { keys: string[] }[] = []
   let startRow = 0
+  const maxBatches = 3
 
-  while (true) {
+  for (let batch = 0; batch < maxBatches; batch++) {
     let res
     try {
       res = await gscFetch(siteUrl, session.access_token, { ...baseQuery, startRow })

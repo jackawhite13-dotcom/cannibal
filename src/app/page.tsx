@@ -117,7 +117,7 @@ export default function Home() {
   // Step 2 — GSC
   const [sites, setSites] = useState<GscSite[]>([])
   const [selectedSite, setSelectedSite] = useState('')
-  const [gscDateRange, setGscDateRange] = useState(90)
+  const [gscDateRange, setGscDateRange] = useState(30)
   const [gscCountry, setGscCountry] = useState('')
   const [gscLoading, setGscLoading] = useState(false)
   const [gscError, setGscError] = useState<string | null>(null)
@@ -237,11 +237,15 @@ export default function Home() {
     setGscLoading(true)
     setGscError(null)
     try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 55000)
       const res = await fetch('/api/gsc/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ siteUrl: selectedSite, dateRange: gscDateRange, country: gscCountry }),
+        signal: controller.signal,
       })
+      clearTimeout(timer)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed to fetch GSC data')
 
@@ -250,7 +254,12 @@ export default function Home() {
       setGscDone(true)
       setWizardStep(3)
     } catch (e: unknown) {
-      setGscError(e instanceof Error ? e.message : 'Unknown error')
+      const msg = e instanceof Error ? e.message : 'Unknown error'
+      if (msg.includes('abort')) {
+        setGscError('Request timed out. Try a shorter time period (30 days) or skip this step.')
+      } else {
+        setGscError(msg)
+      }
     } finally {
       setGscLoading(false)
     }
@@ -564,7 +573,7 @@ export default function Home() {
 
                   <button onClick={handleGscEnrich} disabled={gscLoading || !selectedSite} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
                     <RefreshCw className={`w-4 h-4 ${gscLoading ? 'animate-spin' : ''}`} />
-                    {gscLoading ? 'Enriching data...' : 'Add Days Ranked'}
+                    {gscLoading ? 'Pulling GSC data... this can take 15-30s' : 'Add Days Ranked'}
                   </button>
 
                   {gscError && <div className="px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{gscError}</div>}
