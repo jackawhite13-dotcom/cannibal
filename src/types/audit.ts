@@ -16,6 +16,7 @@ export interface AuditRow {
   totalDays: number
   volume: number | null
   traffic: number | null
+  clicks: number | null
   cannibalizationCount: number
   referringDomains: number | null
   totalKeywords: number | null
@@ -27,7 +28,7 @@ export interface AuditRow {
 export interface AhrefsPosition {
   url: string
   position: number
-  kind: string
+  kind?: string
 }
 
 export interface AhrefsKeywordRow {
@@ -36,7 +37,7 @@ export interface AhrefsKeywordRow {
   sum_traffic: number | null
   best_position: number | null
   best_position_url: string | null
-  serp_target_main_positions_count: number
+  serp_target_positions_count: number
   all_positions: AhrefsPosition[]
 }
 

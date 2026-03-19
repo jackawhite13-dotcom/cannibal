@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useSession, signIn, signOut } from 'next-auth/react'
-import { AuditRow, Recommendation, GscSite } from '@/types/audit'
-import { buildAuditRowsFromAhrefs, enrichWithGscDays, syncRecommendation } from '@/lib/buildAuditRows'
-import { Download, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, ChevronRight } from 'lucide-react'
+import { AuditRow, Recommendation, GscSite, TopPageRow } from '@/types/audit'
+import { buildAuditRowsFromAhrefs, enrichWithGscDays, enrichWithTopPages, syncRecommendation } from '@/lib/buildAuditRows'
+import { parseTopPagesCsv } from '@/lib/parseTopPages'
+import { Download, Upload, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, ChevronRight } from 'lucide-react'
 
 type WizardStep = 1 | 2 | 3 | 4
 
@@ -97,6 +98,9 @@ export default function Home() {
   const [rows, setRows] = useState<AuditRow[]>([])
   const [ahrefsLoading, setAhrefsLoading] = useState(false)
   const [ahrefsError, setAhrefsError] = useState<string | null>(null)
+  const [topPages, setTopPages] = useState<Record<string, TopPageRow>>({})
+  const [csvUploaded, setCsvUploaded] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Restore Ahrefs data after Google sign-in redirect
   useEffect(() => {
@@ -238,7 +242,8 @@ export default function Home() {
     setGscError(null)
     try {
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 55000)
+      const timeoutMs = gscDateRange <= 30 ? 55000 : 110000
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
       const res = await fetch('/api/gsc/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -250,7 +255,8 @@ export default function Home() {
       if (!res.ok) throw new Error(data.error || 'Failed to fetch GSC data')
 
       const daysMap: Record<string, number> = data.daysMap || {}
-      setRows(prev => enrichWithGscDays(prev, daysMap, data.totalDays))
+      const clicksMap: Record<string, { clicks: number; position: number }> = data.clicksMap || {}
+      setRows(prev => enrichWithGscDays(prev, daysMap, clicksMap, data.totalDays))
       setGscDone(true)
       setWizardStep(3)
     } catch (e: unknown) {
@@ -263,6 +269,22 @@ export default function Home() {
     } finally {
       setGscLoading(false)
     }
+  }
+
+  function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string
+      const { map: parsed } = parseTopPagesCsv(text)
+      setTopPages(parsed)
+      setCsvUploaded(true)
+      if (rows.length > 0) {
+        setRows(prev => enrichWithTopPages(prev, parsed))
+      }
+    }
+    reader.readAsText(file)
   }
 
   function handleSignIn(returnToStep: WizardStep) {
@@ -322,15 +344,17 @@ export default function Home() {
 
   function handleExportCsv() {
     const eventHeader = activeEvent ? `Event: ${activeEvent}` : 'Key Events'
-    const headers = ['Keyword', 'URL', 'Position', 'Volume', 'Traffic', 'Days Ranked', 'Days Ranked %', 'Cannibal Count',
+    const headers = ['Keyword', 'URL', 'Position', 'Volume', 'Traffic', 'Clicks', 'Days Ranked', 'Days Ranked %', 'Cannibal Count',
+      ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
       ...(activeEvent ? [eventHeader] : []),
       'Notes', 'Recommendation']
     const csvRows = rows.map(r => [
       r.keyword, r.url, r.position,
-      r.volume ?? '', r.traffic ?? '',
+      r.volume ?? '', r.traffic ?? '', r.clicks ?? '',
       r.daysRanked !== null ? `${r.daysRanked}/${r.totalDays}` : '',
       r.daysRankedPct !== null ? `${r.daysRankedPct}%` : '',
       r.cannibalizationCount,
+      ...(csvUploaded ? [r.referringDomains ?? '', r.totalKeywords ?? ''] : []),
       ...(activeEvent ? [r.keyEvents?.[activeEvent] !== undefined ? r.keyEvents[activeEvent] : ''] : []),
       r.notes, r.recommendation,
     ])
@@ -511,6 +535,22 @@ export default function Home() {
                 </button>
 
                 {ahrefsError && <div className="px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{ahrefsError}</div>}
+
+                {/* Top Pages CSV upload (optional enrichment within Step 1) */}
+                <div className="pt-4 border-t" style={{ borderColor: 'var(--color-border)' }}>
+                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>
+                    Ahrefs Top Pages CSV <span className="font-normal">(optional — adds Referring Domains &amp; Total Keywords)</span>
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors" style={csvUploaded ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+                      <Upload className="w-4 h-4" />
+                      {csvUploaded ? 'CSV Loaded' : 'Upload Top Pages CSV'}
+                    </button>
+                    <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={handleCsvUpload} />
+                    {csvUploaded && <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>Referring Domains &amp; Keywords added to URLs</span>}
+                  </div>
+                  <p className="text-[11px] mt-1.5" style={{ color: 'var(--color-text-muted)' }}>In Ahrefs: Site Explorer → Top Pages → Export CSV</p>
+                </div>
               </div>
             </div>
           )}
@@ -732,7 +772,8 @@ export default function Home() {
                 <thead>
                   <tr style={{ background: 'var(--color-surface)', borderBottom: '2px solid var(--color-border-strong)' }}>
                     {[
-                      'Keyword', 'URL', 'Pos', 'Volume', 'Traffic', 'Days Ranked', 'Cannibal Count',
+                      'Keyword', 'URL', 'Pos', 'Volume', 'Traffic', 'Clicks', 'Days Ranked', 'Cannibal Count',
+                      ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
                       ...(activeEvent ? [activeEvent] : []),
                       'Notes', 'Recommendation',
                     ].map(h => (
@@ -764,6 +805,9 @@ export default function Home() {
                         <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
                           {row.traffic !== null ? row.traffic.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
                         </td>
+                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                          {row.clicks !== null ? row.clicks.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
+                        </td>
                         <td className="px-4 py-2.5 text-center whitespace-nowrap">
                           {row.daysRankedPct !== null ? (
                             <div className="flex flex-col items-center gap-0.5">
@@ -780,6 +824,12 @@ export default function Home() {
                         <td className="px-4 py-2.5 text-center">
                           <span className={`inline-flex items-center justify-center w-7 h-7 rounded-full text-xs ${severityBadge(row.cannibalizationCount)}`}>{row.cannibalizationCount}</span>
                         </td>
+                        {csvUploaded && (
+                          <>
+                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.referringDomains !== null ? row.referringDomains.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
+                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.totalKeywords !== null ? row.totalKeywords.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}</td>
+                          </>
+                        )}
                         {activeEvent && (
                           <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
                             {row.keyEvents?.[activeEvent] !== undefined ? <span className="font-semibold">{row.keyEvents[activeEvent].toLocaleString()}</span> : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}

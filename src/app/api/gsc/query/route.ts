@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
   }
 
-  const { siteUrl, dateRange = 90, country = '' } = await req.json()
+  const { siteUrl, dateRange = 30, country = '' } = await req.json()
   if (!siteUrl) {
     return NextResponse.json({ error: 'siteUrl required' }, { status: 400 })
   }
@@ -45,23 +45,48 @@ export async function POST(req: NextRequest) {
     filters: [{ dimension: 'country', operator: 'equals', expression: COUNTRY_CODES[country] }]
   }] : []
 
-  const baseQuery = {
+  const baseParams = {
     startDate, endDate,
     rowLimit: 25000,
-    dimensions: ['query', 'page', 'date'],
     dataState: 'final',
     ...(dimensionFilterGroups.length > 0 ? { dimensionFilterGroups } : {}),
   }
 
-  // Paginate through results (cap at 3 batches = 75k rows to stay within Vercel timeout)
+  // Call 1: query+page → clicks and position (single call, no pagination needed)
+  const clicksMap: Record<string, { clicks: number; position: number }> = {}
+  try {
+    const res = await gscFetch(siteUrl, session.access_token, {
+      ...baseParams,
+      dimensions: ['query', 'page'],
+      startRow: 0,
+    })
+    if (res.ok) {
+      const data = await res.json()
+      for (const row of (data.rows || []) as { keys: string[]; clicks: number; position: number }[]) {
+        const key = `${row.keys[0]}||${normalizeUrl(row.keys[1])}`
+        clicksMap[key] = {
+          clicks: row.clicks,
+          position: Math.round(row.position * 10) / 10,
+        }
+      }
+    }
+  } catch {
+    // clicks are optional enrichment, don't fail the whole request
+  }
+
+  // Call 2: query+page+date → days ranked (paginated, capped)
   const allRows: { keys: string[] }[] = []
   let startRow = 0
-  const maxBatches = 3
+  const maxBatches = 4 // up to 100k rows
 
   for (let batch = 0; batch < maxBatches; batch++) {
     let res
     try {
-      res = await gscFetch(siteUrl, session.access_token, { ...baseQuery, startRow })
+      res = await gscFetch(siteUrl, session.access_token, {
+        ...baseParams,
+        dimensions: ['query', 'page', 'date'],
+        startRow,
+      })
     } catch (e: unknown) {
       return NextResponse.json(
         { error: `GSC request failed: ${e instanceof Error ? e.message : 'unknown'}` },
@@ -77,7 +102,6 @@ export async function POST(req: NextRequest) {
     const rows = data.rows || []
     allRows.push(...rows)
 
-    // If we got fewer than 25k rows, we have all the data
     if (rows.length < 25000) break
     startRow += 25000
   }
@@ -95,5 +119,5 @@ export async function POST(req: NextRequest) {
     daysMap[key] = dates.size
   }
 
-  return NextResponse.json({ daysMap, totalDays, totalRows: allRows.length })
+  return NextResponse.json({ daysMap, clicksMap, totalDays, totalRows: allRows.length })
 }

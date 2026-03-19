@@ -22,9 +22,9 @@ export async function POST(req: NextRequest) {
 
   const today = new Date().toISOString().split('T')[0]
 
-  // Build where clause — keyword_country goes here, not as a top-level param
+  // Build where clause
   const conditions: object[] = [
-    { field: 'serp_target_main_positions_count', is: ['gt', 1] },
+    { field: 'serp_target_positions_count', is: ['gt', 1] },
   ]
 
   if (country) {
@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
     target: domain,
     mode: 'subdomains',
     date: today,
-    select: 'keyword,volume,sum_traffic,best_position,best_position_url,serp_target_main_positions_count,all_positions',
+    select: 'keyword,volume,sum_traffic,best_position,best_position_url,serp_target_positions_count,all_positions',
     where: JSON.stringify(whereClause),
     order_by: 'sum_traffic:desc',
     limit: '5000',

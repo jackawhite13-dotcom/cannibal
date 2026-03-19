@@ -1,4 +1,4 @@
-import { AuditRow, AhrefsKeywordRow } from '@/types/audit'
+import { AuditRow, AhrefsKeywordRow, TopPageRow } from '@/types/audit'
 
 function normalizeUrl(url: string): string {
   return url
@@ -10,8 +10,7 @@ function normalizeUrl(url: string): string {
 
 export function buildAuditRowsFromAhrefs(
   ahrefsRows: AhrefsKeywordRow[],
-  daysMap?: Record<string, number>,
-  totalDays = 90,
+  topPages?: Record<string, TopPageRow>,
 ): AuditRow[] {
   const flat: AuditRow[] = []
   const seen = new Set<string>()
@@ -36,21 +35,21 @@ export function buildAuditRowsFromAhrefs(
       if (seen.has(dedupeKey)) continue
       seen.add(dedupeKey)
 
-      const daysKey = `${kw.keyword}||${normalizeUrl(url)}`
-      const daysRanked = daysMap?.[daysKey] ?? null
+      const tp = topPages?.[normalizeUrl(url)]
 
       flat.push({
         keyword: kw.keyword,
         url,
         position,
-        daysRanked,
-        daysRankedPct: daysRanked != null ? Math.round((daysRanked / totalDays) * 100) : null,
-        totalDays,
+        daysRanked: null,
+        daysRankedPct: null,
+        totalDays: 0,
         volume: kw.volume ?? null,
         traffic: kw.sum_traffic ?? null,
+        clicks: null,
         cannibalizationCount: uniqueUrls.size,
-        referringDomains: null,
-        totalKeywords: null,
+        referringDomains: tp?.referringDomains ?? null,
+        totalKeywords: tp?.totalKeywords ?? null,
         keyEvents: null,
         notes: '',
         recommendation: '',
@@ -64,17 +63,30 @@ export function buildAuditRowsFromAhrefs(
 export function enrichWithGscDays(
   rows: AuditRow[],
   daysMap: Record<string, number>,
+  clicksMap: Record<string, { clicks: number; position: number }>,
   totalDays: number,
 ): AuditRow[] {
   return rows.map(row => {
     const key = `${row.keyword}||${normalizeUrl(row.url)}`
     const daysRanked = daysMap[key] ?? null
+    const clicksData = clicksMap[key]
     return {
       ...row,
       daysRanked,
       daysRankedPct: daysRanked != null ? Math.round((daysRanked / totalDays) * 100) : null,
       totalDays,
+      clicks: clicksData?.clicks ?? null,
     }
+  })
+}
+
+export function enrichWithTopPages(
+  rows: AuditRow[],
+  topPages: Record<string, TopPageRow>,
+): AuditRow[] {
+  return rows.map(row => {
+    const tp = topPages[normalizeUrl(row.url)]
+    return tp ? { ...row, referringDomains: tp.referringDomains, totalKeywords: tp.totalKeywords } : row
   })
 }
 
