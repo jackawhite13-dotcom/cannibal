@@ -697,9 +697,9 @@ export default function Home() {
           <div className="px-8 pb-8 space-y-4">
             <div className="grid grid-cols-3 gap-3 max-w-xl">
               {[
-                { label: 'Total Keywords', value: uniqueKeywordCount, color: '#FFECDB' },
-                { label: 'GSC Confirmed (2+ URLs)', value: Object.values(groupedByKeyword).filter(g => g.length >= 2 && g[0].cannibalizationCount >= 2).length, color: '#B7EBFF' },
-                { label: 'Affected URLs', value: uniqueUrlCount, color: '#F7E8FD' },
+                { label: 'Ahrefs Keywords', value: ahrefsKeywords.length, color: '#FFECDB' },
+                { label: 'GSC Cannibalizing (2+ URLs)', value: Object.values(groupedByKeyword).filter(g => g.length >= 2).length, color: '#B7EBFF' },
+                { label: 'GSC Single URL', value: Object.values(groupedByKeyword).filter(g => g.length === 1).length, color: '#F7E8FD' },
               ].map(stat => (
                 <div key={stat.label} className="rounded-xl p-4 border" style={{ background: stat.color, borderColor: 'var(--color-border-strong)' }}>
                   <div className="text-2xl font-bold" style={{ color: 'var(--color-text)' }}>{stat.value.toLocaleString()}</div>

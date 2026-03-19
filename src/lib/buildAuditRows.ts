@@ -52,22 +52,7 @@ export function buildAuditRows(
   const rows: AuditRow[] = []
   for (const [keyword, urls] of Object.entries(keywordUrls)) {
     if (urls.length === 0) {
-      // Keyword from Ahrefs but no GSC data at all
-      rows.push({
-        keyword,
-        url: '—',
-        position: 0,
-        daysRanked: null,
-        daysRankedPct: null,
-        totalDays,
-        clicks: 0,
-        cannibalizationCount: 0,
-        referringDomains: null,
-        totalKeywords: null,
-        keyEvents: null,
-        notes: '',
-        recommendation: '',
-      })
+      // Keyword from Ahrefs but no GSC data — skip it, will show in stats
       continue
     }
 
