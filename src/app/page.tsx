@@ -98,6 +98,22 @@ export default function Home() {
   const [ahrefsLoading, setAhrefsLoading] = useState(false)
   const [ahrefsError, setAhrefsError] = useState<string | null>(null)
 
+  // Restore Ahrefs data after Google sign-in redirect
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem('cannibal-ahrefs-data')
+      if (saved) {
+        const { rows: savedRows, domain: savedDomain, step } = JSON.parse(saved)
+        if (savedRows?.length > 0) {
+          setRows(savedRows)
+          setDomain(savedDomain || '')
+          setWizardStep(step || 2)
+        }
+        sessionStorage.removeItem('cannibal-ahrefs-data')
+      }
+    } catch {}
+  }, [])
+
   // Step 2 — GSC
   const [sites, setSites] = useState<GscSite[]>([])
   const [selectedSite, setSelectedSite] = useState('')
@@ -238,6 +254,15 @@ export default function Home() {
     } finally {
       setGscLoading(false)
     }
+  }
+
+  function handleSignIn(returnToStep: WizardStep) {
+    if (rows.length > 0) {
+      sessionStorage.setItem('cannibal-ahrefs-data', JSON.stringify({
+        rows, domain, step: returnToStep,
+      }))
+    }
+    signIn('google')
   }
 
   // Step 3: GA4 events
@@ -507,7 +532,7 @@ export default function Home() {
               {status !== 'authenticated' ? (
                 <div>
                   <p className="text-sm mb-3" style={{ color: 'var(--color-text-muted)' }}>Sign in with Google to access Search Console data.</p>
-                  <button onClick={() => signIn('google')} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
+                  <button onClick={() => handleSignIn(2)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
                     <LogIn className="w-4 h-4" /> Connect Google Account
                   </button>
                 </div>
@@ -583,7 +608,7 @@ export default function Home() {
               {status !== 'authenticated' ? (
                 <div>
                   <p className="text-sm mb-3" style={{ color: 'var(--color-text-muted)' }}>Sign in with Google to access GA4 data.</p>
-                  <button onClick={() => signIn('google')} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
+                  <button onClick={() => handleSignIn(3)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
                     <LogIn className="w-4 h-4" /> Connect Google Account
                   </button>
                 </div>
