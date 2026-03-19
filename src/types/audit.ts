@@ -14,31 +14,13 @@ export interface AuditRow {
   daysRanked: number | null
   daysRankedPct: number | null
   totalDays: number
-  volume: number | null
-  traffic: number | null
-  clicks: number | null
+  clicks: number
   cannibalizationCount: number
   referringDomains: number | null
   totalKeywords: number | null
   keyEvents: Record<string, number> | null
   notes: string
   recommendation: Recommendation
-}
-
-export interface AhrefsPosition {
-  url: string
-  position: number
-  kind?: string
-}
-
-export interface AhrefsKeywordRow {
-  keyword: string
-  volume: number | null
-  sum_traffic: number | null
-  best_position: number | null
-  best_position_url: string | null
-  serp_target_positions_count: number
-  all_positions: AhrefsPosition[]
 }
 
 export interface TopPageRow {

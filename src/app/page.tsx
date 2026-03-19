@@ -3,7 +3,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { useSession, signIn, signOut } from 'next-auth/react'
 import { AuditRow, Recommendation, GscSite, TopPageRow } from '@/types/audit'
-import { buildAuditRowsFromAhrefs, enrichWithGscDays, enrichWithTopPages, syncRecommendation } from '@/lib/buildAuditRows'
+import { buildAuditRows, enrichWithTopPages, syncRecommendation } from '@/lib/buildAuditRows'
+import { parseAhrefsCsv } from '@/lib/parseAhrefsCsv'
 import { parseTopPagesCsv } from '@/lib/parseTopPages'
 import { Download, Upload, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, ChevronRight } from 'lucide-react'
 
@@ -51,17 +52,6 @@ const DATE_RANGES = [
   { label: '6 months', value: 180 },
 ]
 
-const AHREFS_COUNTRIES = [
-  { label: 'All countries', value: '' },
-  { label: 'United States', value: 'US' },
-  { label: 'United Kingdom', value: 'GB' },
-  { label: 'Canada', value: 'CA' },
-  { label: 'Australia', value: 'AU' },
-  { label: 'Germany', value: 'DE' },
-  { label: 'France', value: 'FR' },
-  { label: 'India', value: 'IN' },
-]
-
 const GSC_COUNTRIES = [
   { label: 'All countries', value: '' },
   { label: 'United States', value: 'US' },
@@ -89,34 +79,14 @@ export default function Home() {
   const { data: session, status } = useSession()
   const [wizardStep, setWizardStep] = useState<WizardStep>(1)
 
-  // Step 1 — Ahrefs
-  const [domain, setDomain] = useState('')
-  const [ahrefsCountry, setAhrefsCountry] = useState('US')
-  const [positionMin, setPositionMin] = useState<string>('')
-  const [positionMax, setPositionMax] = useState<string>('')
-  const [brandExclusion, setBrandExclusion] = useState('')
-  const [rows, setRows] = useState<AuditRow[]>([])
-  const [ahrefsLoading, setAhrefsLoading] = useState(false)
-  const [ahrefsError, setAhrefsError] = useState<string | null>(null)
+  // Step 1 — Ahrefs CSV
+  const [ahrefsKeywords, setAhrefsKeywords] = useState<string[]>([])
+  const ahrefsCsvRef = useRef<HTMLInputElement>(null)
+
+  // Step 1 — Top Pages CSV (optional)
   const [topPages, setTopPages] = useState<Record<string, TopPageRow>>({})
   const [csvUploaded, setCsvUploaded] = useState(false)
-  const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // Restore Ahrefs data after Google sign-in redirect
-  useEffect(() => {
-    try {
-      const saved = sessionStorage.getItem('cannibal-ahrefs-data')
-      if (saved) {
-        const { rows: savedRows, domain: savedDomain, step } = JSON.parse(saved)
-        if (savedRows?.length > 0) {
-          setRows(savedRows)
-          setDomain(savedDomain || '')
-          setWizardStep(step || 2)
-        }
-        sessionStorage.removeItem('cannibal-ahrefs-data')
-      }
-    } catch {}
-  }, [])
+  const topPagesCsvRef = useRef<HTMLInputElement>(null)
 
   // Step 2 — GSC
   const [sites, setSites] = useState<GscSite[]>([])
@@ -125,7 +95,7 @@ export default function Home() {
   const [gscCountry, setGscCountry] = useState('')
   const [gscLoading, setGscLoading] = useState(false)
   const [gscError, setGscError] = useState<string | null>(null)
-  const [gscDone, setGscDone] = useState(false)
+  const [rows, setRows] = useState<AuditRow[]>([])
 
   // Step 3 — GA4
   const [ga4Properties, setGa4Properties] = useState<Ga4Property[]>([])
@@ -141,7 +111,23 @@ export default function Home() {
   const [ga4Country, setGa4Country] = useState('')
   const [ga4ChannelGroup, setGa4ChannelGroup] = useState('')
 
-  // Load GSC sites when authenticated and reaching step 2
+  // Restore data after Google sign-in redirect
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem('cannibal-state')
+      if (saved) {
+        const { keywords, tp, tpDone, step } = JSON.parse(saved)
+        if (keywords?.length > 0) {
+          setAhrefsKeywords(keywords)
+          if (tp) { setTopPages(tp); setCsvUploaded(tpDone || false) }
+          setWizardStep(step || 2)
+        }
+        sessionStorage.removeItem('cannibal-state')
+      }
+    } catch {}
+  }, [])
+
+  // Load GSC sites when authenticated and on step 2
   useEffect(() => {
     if (wizardStep === 2 && session?.access_token && sites.length === 0) {
       fetch('/api/gsc/sites')
@@ -198,80 +184,29 @@ export default function Home() {
     return acc
   }, {} as Record<string, AuditRow[]>)
 
-  // Step 1: Ahrefs pull
-  async function handleAhrefsPull() {
-    if (!domain.trim()) return
-    setAhrefsLoading(true)
-    setAhrefsError(null)
-    setRows([])
-    setGscDone(false)
-    try {
-      const body: Record<string, unknown> = { domain: domain.trim() }
-      if (ahrefsCountry) body.country = ahrefsCountry
-      if (positionMin) body.positionMin = parseInt(positionMin)
-      if (positionMax) body.positionMax = parseInt(positionMax)
-      if (brandExclusion.trim()) body.brandExclusion = brandExclusion.trim()
-
-      const res = await fetch('/api/ahrefs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to fetch Ahrefs data')
-
-      const ahrefsRows = data.keywords || data.rows || []
-      const built = buildAuditRowsFromAhrefs(ahrefsRows)
-      if (built.length === 0) {
-        setAhrefsError('No cannibalizing keywords found with these filters. Try widening your position range or removing the brand filter.')
-        return
-      }
-      setRows(built)
-      setWizardStep(2)
-    } catch (e: unknown) {
-      setAhrefsError(e instanceof Error ? e.message : 'Unknown error')
-    } finally {
-      setAhrefsLoading(false)
-    }
-  }
-
-  // Step 2: GSC days ranked
-  async function handleGscEnrich() {
-    if (!selectedSite) return
-    setGscLoading(true)
-    setGscError(null)
-    try {
-      const controller = new AbortController()
-      const timeoutMs = gscDateRange <= 30 ? 55000 : 110000
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
-      const res = await fetch('/api/gsc/query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ siteUrl: selectedSite, dateRange: gscDateRange, country: gscCountry }),
-        signal: controller.signal,
-      })
-      clearTimeout(timer)
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to fetch GSC data')
-
-      const daysMap: Record<string, number> = data.daysMap || {}
-      const clicksMap: Record<string, { clicks: number; position: number }> = data.clicksMap || {}
-      setRows(prev => enrichWithGscDays(prev, daysMap, clicksMap, data.totalDays))
-      setGscDone(true)
-      setWizardStep(3)
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Unknown error'
-      if (msg.includes('abort')) {
-        setGscError('Request timed out. Try a shorter time period (30 days) or skip this step.')
+  // Step 1: Upload Ahrefs CSV
+  function handleAhrefsCsv(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const buf = ev.target?.result as ArrayBuffer
+      // Try UTF-16 first, fall back to UTF-8
+      let text: string
+      const bytes = new Uint8Array(buf)
+      if ((bytes[0] === 0xFF && bytes[1] === 0xFE) || (bytes[0] === 0xFE && bytes[1] === 0xFF)) {
+        text = new TextDecoder('utf-16').decode(buf)
       } else {
-        setGscError(msg)
+        text = new TextDecoder('utf-8').decode(buf)
       }
-    } finally {
-      setGscLoading(false)
+      const keywords = parseAhrefsCsv(text)
+      setAhrefsKeywords(keywords)
     }
+    reader.readAsArrayBuffer(file)
   }
 
-  function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
+  // Step 1: Upload Top Pages CSV
+  function handleTopPagesCsv(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
     const reader = new FileReader()
@@ -288,12 +223,64 @@ export default function Home() {
   }
 
   function handleSignIn(returnToStep: WizardStep) {
-    if (rows.length > 0) {
-      sessionStorage.setItem('cannibal-ahrefs-data', JSON.stringify({
-        rows, domain, step: returnToStep,
+    if (ahrefsKeywords.length > 0) {
+      sessionStorage.setItem('cannibal-state', JSON.stringify({
+        keywords: ahrefsKeywords,
+        tp: csvUploaded ? topPages : null,
+        tpDone: csvUploaded,
+        step: returnToStep,
       }))
     }
     signIn('google')
+  }
+
+  // Step 2: GSC pull
+  async function handleGscPull() {
+    if (!selectedSite || ahrefsKeywords.length === 0) return
+    setGscLoading(true)
+    setGscError(null)
+    try {
+      const controller = new AbortController()
+      const timeoutMs = gscDateRange <= 30 ? 55000 : 110000
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      const res = await fetch('/api/gsc/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          siteUrl: selectedSite,
+          dateRange: gscDateRange,
+          country: gscCountry,
+          keywords: ahrefsKeywords,
+        }),
+        signal: controller.signal,
+      })
+      clearTimeout(timer)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch GSC data')
+
+      const built = buildAuditRows(
+        data.keywordUrlData || {},
+        data.daysMap || {},
+        data.totalDays,
+        ahrefsKeywords,
+        csvUploaded ? topPages : undefined,
+      )
+      setRows(built)
+      if (built.length === 0) {
+        setGscError('No cannibalizing keywords found in GSC. The keywords from your Ahrefs export may not match this GSC property, or GSC may not have data for them in this time period.')
+      } else {
+        setWizardStep(3)
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Unknown error'
+      if (msg.includes('abort')) {
+        setGscError('Request timed out. Try a shorter time period (30 days) or skip this step.')
+      } else {
+        setGscError(msg)
+      }
+    } finally {
+      setGscLoading(false)
+    }
   }
 
   // Step 3: GA4 events
@@ -318,8 +305,9 @@ export default function Home() {
       setActiveEvent(selectedEvent)
       let matched = 0
       setRows(prev => prev.map(row => {
-        const path = row.url.replace(/^https?:\/\/[^/]+/, '').replace(/\/$/, '') || '/'
-        const count = pathMap[path] ?? null
+        const path = '/' + row.url.replace(/^[^/]+/, '').replace(/^\//, '')
+        const pathNorm = path.replace(/\/$/, '') || '/'
+        const count = pathMap[pathNorm] ?? null
         if (count !== null) matched++
         return { ...row, keyEvents: count !== null ? { ...(row.keyEvents || {}), [selectedEvent]: count } : row.keyEvents }
       }))
@@ -344,13 +332,12 @@ export default function Home() {
 
   function handleExportCsv() {
     const eventHeader = activeEvent ? `Event: ${activeEvent}` : 'Key Events'
-    const headers = ['Keyword', 'URL', 'Position', 'Volume', 'Traffic', 'Clicks', 'Days Ranked', 'Days Ranked %', 'Cannibal Count',
+    const headers = ['Keyword', 'URL', 'Avg Position', 'Clicks', 'Days Ranked', 'Days Ranked %', 'Cannibal Count',
       ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
       ...(activeEvent ? [eventHeader] : []),
       'Notes', 'Recommendation']
     const csvRows = rows.map(r => [
-      r.keyword, r.url, r.position,
-      r.volume ?? '', r.traffic ?? '', r.clicks ?? '',
+      r.keyword, r.url, r.position, r.clicks,
       r.daysRanked !== null ? `${r.daysRanked}/${r.totalDays}` : '',
       r.daysRankedPct !== null ? `${r.daysRankedPct}%` : '',
       r.cannibalizationCount,
@@ -363,7 +350,8 @@ export default function Home() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `cannibal-audit-${domain}-${new Date().toISOString().split('T')[0]}.csv`
+    const siteName = selectedSite.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    a.download = `cannibal-audit-${siteName}-${new Date().toISOString().split('T')[0]}.csv`
     a.click()
   }
 
@@ -371,27 +359,26 @@ export default function Home() {
   const uniqueUrlCount = new Set(rows.map(r => r.url)).size
 
   const stepDone = (s: WizardStep) => {
-    if (s === 1) return rows.length > 0
-    if (s === 2) return gscDone
+    if (s === 1) return ahrefsKeywords.length > 0
+    if (s === 2) return rows.length > 0
     if (s === 3) return !!activeEvent
     return false
   }
 
   const stepLabel = (s: WizardStep) => {
-    if (s === 1) return 'Ahrefs Data'
-    if (s === 2) return 'Days Ranked (GSC)'
+    if (s === 1) return 'Ahrefs Keywords'
+    if (s === 2) return 'Search Console'
     if (s === 3) return 'GA4 Key Events'
     return 'Audit'
   }
 
   const stepSummary = (s: WizardStep) => {
-    if (s === 1) return `${domain} · ${uniqueKeywordCount} keywords · ${uniqueUrlCount} URLs`
-    if (s === 2) return gscDone ? `${gscDateRange}d · ${gscCountry || 'Global'}` : 'Skipped'
+    if (s === 1) return `${ahrefsKeywords.length} keywords loaded`
+    if (s === 2) return rows.length > 0 ? `${uniqueKeywordCount} keywords · ${uniqueUrlCount} URLs · ${gscDateRange}d` : 'Not run'
     if (s === 3) return activeEvent ? `${activeEvent} · ${ga4MatchCount ?? 0} URLs matched` : 'Skipped'
     return ''
   }
 
-  // Dropdown helper
   const SelectField = ({ label, value, onChange, options, maxW = 'max-w-[220px]' }: {
     label: string; value: string; onChange: (v: string) => void;
     options: { label: string; value: string }[]; maxW?: string
@@ -424,12 +411,11 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Step nav */}
         <nav className="flex-1 p-3 space-y-1">
           {([1, 2, 3] as WizardStep[]).map(s => (
             <button
               key={s}
-              onClick={() => (s === 1 || rows.length > 0) ? setWizardStep(s) : null}
+              onClick={() => (s === 1 || ahrefsKeywords.length > 0) ? setWizardStep(s) : null}
               className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${wizardStep === s ? 'font-semibold border-l-2 border-[#232323]' : 'hover:opacity-70'}`}
               style={{ background: wizardStep === s ? 'rgba(248,214,185,0.6)' : 'transparent', color: 'var(--color-text)' }}
             >
@@ -437,8 +423,8 @@ export default function Home() {
                 {stepDone(s) ? <Check className="w-3 h-3" /> : s}
               </span>
               <span className="flex-1">{stepLabel(s)}</span>
-              {s === 1 && <span className="text-[9px] opacity-40 uppercase tracking-wide">req</span>}
-              {s !== 1 && <span className="text-[9px] opacity-40 uppercase tracking-wide">opt</span>}
+              {s <= 2 && <span className="text-[9px] opacity-40 uppercase tracking-wide">req</span>}
+              {s === 3 && <span className="text-[9px] opacity-40 uppercase tracking-wide">opt</span>}
             </button>
           ))}
           {rows.length > 0 && (
@@ -483,71 +469,47 @@ export default function Home() {
 
         <div className="px-8 py-6 space-y-4 max-w-3xl">
 
-          {/* ── STEP 1: Ahrefs ── */}
+          {/* ── STEP 1: Ahrefs CSV ── */}
           {wizardStep === 1 && (
             <div className="card">
               <div className="flex items-center gap-2 mb-5">
                 <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center text-xs font-bold">1</span>
-                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Ahrefs Data</h2>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Ahrefs Keywords</h2>
                 <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: '#232323', color: '#fff' }}>Required</span>
               </div>
 
+              <p className="text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
+                Export your cannibalizing keywords from Ahrefs (with &quot;Multiple URLs only&quot; toggled on) and upload the CSV here.
+              </p>
+
               <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Domain</label>
-                  <input
-                    type="text"
-                    value={domain}
-                    onChange={e => setDomain(e.target.value)}
-                    placeholder="example.com"
-                    className="max-w-sm w-full px-3 py-2 text-sm rounded-lg outline-none"
-                    style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                    onKeyDown={e => e.key === 'Enter' && handleAhrefsPull()}
-                  />
+                <div className="flex items-center gap-3">
+                  <button onClick={() => ahrefsCsvRef.current?.click()} className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium border transition-colors" style={ahrefsKeywords.length > 0 ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+                    <Upload className="w-4 h-4" />
+                    {ahrefsKeywords.length > 0 ? `${ahrefsKeywords.length} keywords loaded` : 'Upload Ahrefs Organic Keywords CSV'}
+                  </button>
+                  <input ref={ahrefsCsvRef} type="file" accept=".csv" className="hidden" onChange={handleAhrefsCsv} />
                 </div>
 
-                <SelectField label="Country" value={ahrefsCountry} onChange={setAhrefsCountry} options={AHREFS_COUNTRIES} />
-
-                <div>
-                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Position Range <span className="font-normal">(optional)</span></label>
-                  <div className="flex items-center gap-2 max-w-[220px]">
-                    <input type="number" value={positionMin} onChange={e => setPositionMin(e.target.value)} placeholder="1" min={1} max={100} className="w-20 px-3 py-2 text-sm rounded-lg outline-none" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }} />
-                    <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>to</span>
-                    <input type="number" value={positionMax} onChange={e => setPositionMax(e.target.value)} placeholder="100" min={1} max={100} className="w-20 px-3 py-2 text-sm rounded-lg outline-none" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }} />
+                {ahrefsKeywords.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setWizardStep(2)} className="flex items-center gap-1 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
+                      Next: Search Console <ChevronRight className="w-4 h-4" />
+                    </button>
                   </div>
-                </div>
+                )}
 
-                <div>
-                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Exclude Branded Terms <span className="font-normal">(optional)</span></label>
-                  <input
-                    type="text"
-                    value={brandExclusion}
-                    onChange={e => setBrandExclusion(e.target.value)}
-                    placeholder="e.g. your brand name"
-                    className="max-w-sm w-full px-3 py-2 text-sm rounded-lg outline-none"
-                    style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
-                  />
-                </div>
-
-                <button onClick={handleAhrefsPull} disabled={ahrefsLoading || !domain.trim()} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
-                  <RefreshCw className={`w-4 h-4 ${ahrefsLoading ? 'animate-spin' : ''}`} />
-                  {ahrefsLoading ? 'Pulling data...' : 'Pull Cannibalizing Keywords'}
-                </button>
-
-                {ahrefsError && <div className="px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{ahrefsError}</div>}
-
-                {/* Top Pages CSV upload (optional enrichment within Step 1) */}
+                {/* Top Pages CSV (optional) */}
                 <div className="pt-4 border-t" style={{ borderColor: 'var(--color-border)' }}>
                   <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>
                     Ahrefs Top Pages CSV <span className="font-normal">(optional — adds Referring Domains &amp; Total Keywords)</span>
                   </label>
                   <div className="flex items-center gap-3">
-                    <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors" style={csvUploaded ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+                    <button onClick={() => topPagesCsvRef.current?.click()} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors" style={csvUploaded ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
                       <Upload className="w-4 h-4" />
-                      {csvUploaded ? 'CSV Loaded' : 'Upload Top Pages CSV'}
+                      {csvUploaded ? 'Top Pages loaded' : 'Upload Top Pages CSV'}
                     </button>
-                    <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={handleCsvUpload} />
-                    {csvUploaded && <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>Referring Domains &amp; Keywords added to URLs</span>}
+                    <input ref={topPagesCsvRef} type="file" accept=".csv" className="hidden" onChange={handleTopPagesCsv} />
                   </div>
                   <p className="text-[11px] mt-1.5" style={{ color: 'var(--color-text-muted)' }}>In Ahrefs: Site Explorer → Top Pages → Export CSV</p>
                 </div>
@@ -556,7 +518,7 @@ export default function Home() {
           )}
 
           {/* Step 1 summary */}
-          {rows.length > 0 && wizardStep > 1 && (
+          {ahrefsKeywords.length > 0 && wizardStep > 1 && (
             <button onClick={() => setWizardStep(1)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
               <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center flex-shrink-0"><Check className="w-3 h-3" /></span>
               <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 1 — Ahrefs</span>
@@ -565,17 +527,17 @@ export default function Home() {
             </button>
           )}
 
-          {/* ── STEP 2: GSC Days Ranked ── */}
+          {/* ── STEP 2: GSC ── */}
           {wizardStep === 2 && (
             <div className="card">
               <div className="flex items-center gap-2 mb-5">
-                <span className="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold" style={{ borderColor: '#232323', color: '#232323' }}>2</span>
-                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Days Ranked (Search Console)</h2>
-                <span className="text-[10px] px-2 py-0.5 rounded-full border font-medium" style={{ borderColor: 'var(--color-border-strong)', color: 'var(--color-text-muted)' }}>Optional</span>
+                <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center text-xs font-bold">2</span>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Search Console</h2>
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: '#232323', color: '#fff' }}>Required</span>
               </div>
 
               <p className="text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
-                Shows what percentage of days each keyword-URL pair actually appeared in Google search results.
+                Finds all competing URLs for your {ahrefsKeywords.length} keywords, plus avg position, clicks, and days ranked.
               </p>
 
               {status !== 'authenticated' ? (
@@ -611,35 +573,22 @@ export default function Home() {
 
                   <SelectField label="Country" value={gscCountry} onChange={setGscCountry} options={GSC_COUNTRIES} />
 
-                  <button onClick={handleGscEnrich} disabled={gscLoading || !selectedSite} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
+                  <button onClick={handleGscPull} disabled={gscLoading || !selectedSite} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
                     <RefreshCw className={`w-4 h-4 ${gscLoading ? 'animate-spin' : ''}`} />
-                    {gscLoading ? 'Pulling GSC data... this can take 15-30s' : 'Add Days Ranked'}
+                    {gscLoading ? 'Pulling GSC data... this can take 15-30s' : 'Pull Data'}
                   </button>
 
                   {gscError && <div className="px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{gscError}</div>}
                 </div>
               )}
-
-              <div className="mt-5 pt-4 border-t flex items-center justify-between" style={{ borderColor: 'var(--color-border)' }}>
-                <button onClick={() => setWizardStep(3)} className="text-sm hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>
-                  Skip this step →
-                </button>
-                {gscDone && (
-                  <button onClick={() => setWizardStep(3)} className="flex items-center gap-1 text-sm font-medium" style={{ color: '#232323' }}>
-                    Next: GA4 Events <ChevronRight className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
             </div>
           )}
 
           {/* Step 2 summary */}
           {rows.length > 0 && wizardStep > 2 && (
             <button onClick={() => setWizardStep(2)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
-              <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: gscDone ? '#232323' : 'var(--color-border-strong)', color: gscDone ? '#fff' : 'var(--color-text)' }}>
-                {gscDone ? <Check className="w-3 h-3" /> : <span className="text-xs">2</span>}
-              </span>
-              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 2 — Days Ranked</span>
+              <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center flex-shrink-0"><Check className="w-3 h-3" /></span>
+              <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 2 — Search Console</span>
               <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{stepSummary(2)}</span>
               <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
             </button>
@@ -726,14 +675,12 @@ export default function Home() {
             </div>
           )}
 
-          {/* Step 3 summary */}
+          {/* Step summaries on audit page */}
           {rows.length > 0 && wizardStep === 4 && (
             <>
               <button onClick={() => setWizardStep(2)} className="card w-full flex items-center gap-3 text-left hover:opacity-80 transition-opacity">
-                <span className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: gscDone ? '#232323' : 'var(--color-border-strong)', color: gscDone ? '#fff' : 'var(--color-text)' }}>
-                  {gscDone ? <Check className="w-3 h-3" /> : <span className="text-xs">2</span>}
-                </span>
-                <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 2 — Days Ranked</span>
+                <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center flex-shrink-0"><Check className="w-3 h-3" /></span>
+                <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Step 2 — Search Console</span>
                 <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{stepSummary(2)}</span>
                 <span className="ml-auto text-xs" style={{ color: 'var(--color-text-muted)' }}>Edit</span>
               </button>
@@ -749,10 +696,9 @@ export default function Home() {
           )}
         </div>
 
-        {/* ── STEP 4: Audit table (full width) ── */}
+        {/* ── STEP 4: Audit table ── */}
         {rows.length > 0 && wizardStep === 4 && (
           <div className="px-8 pb-8 space-y-4">
-            {/* Stats */}
             <div className="grid grid-cols-3 gap-3 max-w-xl">
               {[
                 { label: 'Cannibalizing Keywords', value: uniqueKeywordCount, color: '#FFECDB' },
@@ -766,13 +712,12 @@ export default function Home() {
               ))}
             </div>
 
-            {/* Table */}
             <div className="rounded-xl border overflow-auto" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
-              <table className="w-full text-sm" style={{ minWidth: '1000px' }}>
+              <table className="w-full text-sm" style={{ minWidth: '900px' }}>
                 <thead>
                   <tr style={{ background: 'var(--color-surface)', borderBottom: '2px solid var(--color-border-strong)' }}>
                     {[
-                      'Keyword', 'URL', 'Pos', 'Volume', 'Traffic', 'Clicks', 'Days Ranked', 'Cannibal Count',
+                      'Keyword', 'URL', 'Avg Pos', 'Clicks', 'Days Ranked', 'Cannibal Count',
                       ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
                       ...(activeEvent ? [activeEvent] : []),
                       'Notes', 'Recommendation',
@@ -794,19 +739,13 @@ export default function Home() {
                           {i === 0 ? <span className="line-clamp-2 text-sm">{keyword}</span> : null}
                         </td>
                         <td className="px-4 py-2.5 font-mono text-xs max-w-[220px]" style={{ color: 'var(--color-text-muted)' }}>
-                          <span className="truncate block" title={row.url}>{row.url.replace(/^https?:\/\/[^/]+/, '') || '/'}</span>
+                          <span className="truncate block" title={row.url}>/{row.url.split('/').slice(1).join('/')}</span>
                         </td>
                         <td className="px-4 py-2.5 text-center">
                           <span className={`text-sm font-mono ${positionColor(row.position)}`}>{row.position}</span>
                         </td>
                         <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                          {row.volume !== null ? row.volume.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
-                        </td>
-                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                          {row.traffic !== null ? row.traffic.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
-                        </td>
-                        <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                          {row.clicks !== null ? row.clicks.toLocaleString() : <span style={{ color: 'var(--color-border-strong)' }}>—</span>}
+                          {row.clicks.toLocaleString()}
                         </td>
                         <td className="px-4 py-2.5 text-center whitespace-nowrap">
                           {row.daysRankedPct !== null ? (

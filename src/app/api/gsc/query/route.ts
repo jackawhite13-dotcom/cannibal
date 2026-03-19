@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
   }
 
-  const { siteUrl, dateRange = 30, country = '' } = await req.json()
+  const { siteUrl, dateRange = 30, country = '', keywords = [] } = await req.json()
   if (!siteUrl) {
     return NextResponse.json({ error: 'siteUrl required' }, { status: 400 })
   }
@@ -52,8 +52,11 @@ export async function POST(req: NextRequest) {
     ...(dimensionFilterGroups.length > 0 ? { dimensionFilterGroups } : {}),
   }
 
-  // Call 1: query+page → clicks and position (single call, no pagination needed)
-  const clicksMap: Record<string, { clicks: number; position: number }> = {}
+  // Build keyword set for filtering (lowercase for matching)
+  const keywordSet = new Set((keywords as string[]).map((k: string) => k.toLowerCase().trim()))
+
+  // Call 1: query+page → all URLs + avg position + clicks (fast, one call)
+  const keywordUrlData: Record<string, { clicks: number; position: number }> = {}
   try {
     const res = await gscFetch(siteUrl, session.access_token, {
       ...baseParams,
@@ -63,21 +66,25 @@ export async function POST(req: NextRequest) {
     if (res.ok) {
       const data = await res.json()
       for (const row of (data.rows || []) as { keys: string[]; clicks: number; position: number }[]) {
-        const key = `${row.keys[0]}||${normalizeUrl(row.keys[1])}`
-        clicksMap[key] = {
-          clicks: row.clicks,
-          position: Math.round(row.position * 10) / 10,
+        const query = row.keys[0].toLowerCase().trim()
+        // Only keep rows that match our Ahrefs keyword list
+        if (keywordSet.size === 0 || keywordSet.has(query)) {
+          const key = `${row.keys[0]}||${normalizeUrl(row.keys[1])}`
+          keywordUrlData[key] = {
+            clicks: row.clicks,
+            position: Math.round(row.position * 10) / 10,
+          }
         }
       }
     }
   } catch {
-    // clicks are optional enrichment, don't fail the whole request
+    // non-fatal
   }
 
-  // Call 2: query+page+date → days ranked (paginated, capped)
-  const allRows: { keys: string[] }[] = []
+  // Call 2: query+page+date → days ranked (paginated)
+  const allDateRows: { keys: string[] }[] = []
   let startRow = 0
-  const maxBatches = 4 // up to 100k rows
+  const maxBatches = 4
 
   for (let batch = 0; batch < maxBatches; batch++) {
     let res
@@ -88,30 +95,28 @@ export async function POST(req: NextRequest) {
         startRow,
       })
     } catch (e: unknown) {
-      return NextResponse.json(
-        { error: `GSC request failed: ${e instanceof Error ? e.message : 'unknown'}` },
-        { status: 500 }
-      )
+      // If the date call fails, we still return what we have from call 1
+      break
     }
 
-    if (!res.ok) {
-      return NextResponse.json({ error: await res.text() }, { status: res.status })
-    }
+    if (!res.ok) break
 
     const data = await res.json()
     const rows = data.rows || []
-    allRows.push(...rows)
-
+    allDateRows.push(...rows)
     if (rows.length < 25000) break
     startRow += 25000
   }
 
-  // Count unique dates per keyword-url pair
+  // Count unique dates per keyword-url pair (only for our keywords)
   const dateSetMap: Record<string, Set<string>> = {}
-  for (const row of allRows) {
-    const key = `${row.keys[0]}||${normalizeUrl(row.keys[1])}`
-    if (!dateSetMap[key]) dateSetMap[key] = new Set()
-    dateSetMap[key].add(row.keys[2])
+  for (const row of allDateRows) {
+    const query = row.keys[0].toLowerCase().trim()
+    if (keywordSet.size === 0 || keywordSet.has(query)) {
+      const key = `${row.keys[0]}||${normalizeUrl(row.keys[1])}`
+      if (!dateSetMap[key]) dateSetMap[key] = new Set()
+      dateSetMap[key].add(row.keys[2])
+    }
   }
 
   const daysMap: Record<string, number> = {}
@@ -119,5 +124,5 @@ export async function POST(req: NextRequest) {
     daysMap[key] = dates.size
   }
 
-  return NextResponse.json({ daysMap, clicksMap, totalDays, totalRows: allRows.length })
+  return NextResponse.json({ keywordUrlData, daysMap, totalDays })
 }

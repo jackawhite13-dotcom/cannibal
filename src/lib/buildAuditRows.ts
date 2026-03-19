@@ -1,4 +1,4 @@
-import { AuditRow, AhrefsKeywordRow, TopPageRow } from '@/types/audit'
+import { AuditRow, TopPageRow } from '@/types/audit'
 
 function normalizeUrl(url: string): string {
   return url
@@ -8,46 +8,58 @@ function normalizeUrl(url: string): string {
     .toLowerCase()
 }
 
-export function buildAuditRowsFromAhrefs(
-  ahrefsRows: AhrefsKeywordRow[],
+/**
+ * Build audit rows from GSC data, filtered to Ahrefs keyword list.
+ * keywordUrlData: Record<"keyword||normalizedUrl", { clicks, position }>
+ * daysMap: Record<"keyword||normalizedUrl", daysCount>
+ * ahrefsKeywords: list of keywords from Ahrefs CSV
+ */
+export function buildAuditRows(
+  keywordUrlData: Record<string, { clicks: number; position: number }>,
+  daysMap: Record<string, number>,
+  totalDays: number,
+  ahrefsKeywords: string[],
   topPages?: Record<string, TopPageRow>,
 ): AuditRow[] {
-  const flat: AuditRow[] = []
-  const seen = new Set<string>()
+  const keywordSet = new Set(ahrefsKeywords.map(k => k.toLowerCase().trim()))
 
-  for (const kw of ahrefsRows) {
-    const positions = kw.all_positions || []
+  // Group by keyword to find cannibalization
+  const keywordUrls: Record<string, { url: string; clicks: number; position: number; daysRanked: number | null }[]> = {}
 
-    // Deduplicate: get unique URLs from all_positions
-    const uniqueUrls = new Map<string, { url: string; position: number }>()
-    for (const pos of positions) {
-      const norm = normalizeUrl(pos.url)
-      if (!uniqueUrls.has(norm)) {
-        uniqueUrls.set(norm, { url: pos.url, position: pos.position })
-      }
-    }
+  for (const [key, data] of Object.entries(keywordUrlData)) {
+    const [keyword, normUrl] = key.split('||')
+    const kwLower = keyword.toLowerCase().trim()
 
-    // Only include if 2+ unique URLs (real cannibalization)
-    if (uniqueUrls.size < 2) continue
+    if (!keywordSet.has(kwLower)) continue
 
-    for (const { url, position } of uniqueUrls.values()) {
-      const dedupeKey = `${kw.keyword}||${normalizeUrl(url)}`
-      if (seen.has(dedupeKey)) continue
-      seen.add(dedupeKey)
+    if (!keywordUrls[keyword]) keywordUrls[keyword] = []
+    keywordUrls[keyword].push({
+      url: normUrl,
+      clicks: data.clicks,
+      position: data.position,
+      daysRanked: daysMap[key] ?? null,
+    })
+  }
 
-      const tp = topPages?.[normalizeUrl(url)]
+  // Only keep keywords with 2+ URLs (real cannibalization)
+  const rows: AuditRow[] = []
+  for (const [keyword, urls] of Object.entries(keywordUrls)) {
+    if (urls.length < 2) continue
 
-      flat.push({
-        keyword: kw.keyword,
-        url,
-        position,
-        daysRanked: null,
-        daysRankedPct: null,
-        totalDays: 0,
-        volume: kw.volume ?? null,
-        traffic: kw.sum_traffic ?? null,
-        clicks: null,
-        cannibalizationCount: uniqueUrls.size,
+    // Sort by position ascending
+    urls.sort((a, b) => a.position - b.position)
+
+    for (const u of urls) {
+      const tp = topPages?.[u.url]
+      rows.push({
+        keyword,
+        url: u.url,
+        position: u.position,
+        daysRanked: u.daysRanked,
+        daysRankedPct: u.daysRanked != null ? Math.round((u.daysRanked / totalDays) * 100) : null,
+        totalDays,
+        clicks: u.clicks,
+        cannibalizationCount: urls.length,
         referringDomains: tp?.referringDomains ?? null,
         totalKeywords: tp?.totalKeywords ?? null,
         keyEvents: null,
@@ -57,27 +69,14 @@ export function buildAuditRowsFromAhrefs(
     }
   }
 
-  return flat
-}
+  // Sort keyword groups by total clicks descending
+  const kwOrder: Record<string, number> = {}
+  for (const row of rows) {
+    kwOrder[row.keyword] = (kwOrder[row.keyword] || 0) + row.clicks
+  }
+  rows.sort((a, b) => (kwOrder[b.keyword] || 0) - (kwOrder[a.keyword] || 0) || a.position - b.position)
 
-export function enrichWithGscDays(
-  rows: AuditRow[],
-  daysMap: Record<string, number>,
-  clicksMap: Record<string, { clicks: number; position: number }>,
-  totalDays: number,
-): AuditRow[] {
-  return rows.map(row => {
-    const key = `${row.keyword}||${normalizeUrl(row.url)}`
-    const daysRanked = daysMap[key] ?? null
-    const clicksData = clicksMap[key]
-    return {
-      ...row,
-      daysRanked,
-      daysRankedPct: daysRanked != null ? Math.round((daysRanked / totalDays) * 100) : null,
-      totalDays,
-      clicks: clicksData?.clicks ?? null,
-    }
-  })
+  return rows
 }
 
 export function enrichWithTopPages(
@@ -85,7 +84,7 @@ export function enrichWithTopPages(
   topPages: Record<string, TopPageRow>,
 ): AuditRow[] {
   return rows.map(row => {
-    const tp = topPages[normalizeUrl(row.url)]
+    const tp = topPages[row.url]
     return tp ? { ...row, referringDomains: tp.referringDomains, totalKeywords: tp.totalKeywords } : row
   })
 }
