@@ -4,6 +4,7 @@ export type Recommendation =
   | 'Consolidate'
   | 'Optimize'
   | 'No Action'
+  | 'Custom'
   | ''
 
 export interface AuditRow {
@@ -20,6 +21,9 @@ export interface AuditRow {
   keyEvents: Record<string, number> | null
   notes: string
   recommendation: Recommendation
+  action: string
+  targetUrl: string
+  overridden: boolean
 }
 
 export interface TopPageRow {

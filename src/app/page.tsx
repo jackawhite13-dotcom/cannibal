@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useSession, signIn, signOut } from 'next-auth/react'
 import { AuditRow, Recommendation, GscSite, TopPageRow } from '@/types/audit'
-import { buildAuditRows, enrichWithTopPages, syncRecommendation } from '@/lib/buildAuditRows'
+import { buildAuditRows, enrichWithTopPages } from '@/lib/buildAuditRows'
 import { parseAhrefsCsv } from '@/lib/parseAhrefsCsv'
 import { parseTopPagesCsv } from '@/lib/parseTopPages'
 import { supabase } from '@/lib/supabase'
@@ -12,7 +12,7 @@ import { Download, Upload, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw,
 type WizardStep = 1 | 2 | 3 | 4 | 'methodology'
 
 const RECOMMENDATIONS: Recommendation[] = [
-  '', '301 Redirect', 'De-optimize', 'Consolidate', 'Optimize', 'No Action',
+  '', '301 Redirect', 'De-optimize', 'Consolidate', 'Optimize', 'No Action', 'Custom',
 ]
 
 const REC_STYLES: Record<string, string> = {
@@ -21,8 +21,40 @@ const REC_STYLES: Record<string, string> = {
   'Consolidate': 'bg-yellow-100 text-yellow-700',
   'Optimize': 'bg-[#C3F2D0] text-green-800',
   'No Action': 'bg-[#F7E8FD] text-purple-600',
+  'Custom': 'bg-[#B7EBFF] text-sky-700',
   '': 'bg-[rgba(248,214,185,0.3)] text-[rgba(35,35,35,0.4)]',
 }
+
+// URL-level recs propagate to all rows with the same URL
+const URL_LEVEL_RECS: Recommendation[] = ['301 Redirect', 'Consolidate']
+
+function generateActionText(rec: Recommendation, keyword: string, targetUrl: string): string {
+  switch (rec) {
+    case 'No Action': return 'No action needed.'
+    case 'De-optimize': return `Remove ranking signals for "${keyword}" from this page.`
+    case 'Optimize': return `Strengthen this page for "${keyword}".`
+    case '301 Redirect': return targetUrl ? `Redirect to ${targetUrl}` : 'Select a target URL.'
+    case 'Consolidate': return targetUrl ? `Merge content into ${targetUrl}` : 'Select a target URL.'
+    case 'Custom': return ''
+    default: return ''
+  }
+}
+
+const ALL_COLUMNS = [
+  { key: 'keyword', label: 'Keyword' },
+  { key: 'url', label: 'URL' },
+  { key: 'avgPos', label: 'Avg Pos' },
+  { key: 'clicks', label: 'Clicks' },
+  { key: 'daysRanked', label: 'Days Ranked' },
+  { key: 'auditAppearances', label: 'Audit Appearances' },
+  { key: 'refDomains', label: 'Ref Domains' },
+  { key: 'totalKws', label: 'Total KWs' },
+  { key: 'keyEvents', label: 'Key Events' },
+  { key: 'notes', label: 'Notes' },
+  { key: 'rec', label: 'Rec' },
+  { key: 'action', label: 'Action' },
+  { key: 'remove', label: '' },
+] as const
 
 
 interface Ga4Property { propertyId: string; displayName: string }
@@ -93,7 +125,17 @@ export default function Home() {
   const [ga4Country, setGa4Country] = useState('')
   const [ga4ChannelGroup, setGa4ChannelGroup] = useState('')
 
-  // #10: Supabase saved audits
+  // Column visibility
+  const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set())
+  const [showColPicker, setShowColPicker] = useState(false)
+  const toggleCol = (key: string) => setHiddenCols(prev => {
+    const next = new Set(prev)
+    next.has(key) ? next.delete(key) : next.add(key)
+    return next
+  })
+  const isColVisible = (key: string) => !hiddenCols.has(key)
+
+  // Supabase saved audits
   const [savedAudits, setSavedAudits] = useState<SavedAudit[]>([])
   const [auditName, setAuditName] = useState('')
   const [saving, setSaving] = useState(false)
@@ -298,34 +340,77 @@ export default function Home() {
     }
   }
 
-  function handleRecChange(url: string, rec: Recommendation) {
-    setRows(prev => syncRecommendation(prev, url, rec))
+  function handleRecChange(keyword: string, url: string, rec: Recommendation) {
+    setRows(prev => {
+      const actionText = generateActionText(rec, keyword, '')
+
+      if (URL_LEVEL_RECS.includes(rec)) {
+        // Propagate to all rows with same URL (unless overridden)
+        return prev.map(r => {
+          if (r.url === url && !r.overridden) {
+            return { ...r, recommendation: rec, action: generateActionText(rec, r.keyword, ''), targetUrl: '' }
+          }
+          return r
+        })
+      }
+      // Row-level: only this keyword+url pair
+      return prev.map(r =>
+        r.keyword === keyword && r.url === url ? { ...r, recommendation: rec, action: actionText, targetUrl: '' } : r
+      )
+    })
+  }
+
+  function handleTargetUrlChange(keyword: string, sourceUrl: string, targetUrl: string) {
+    setRows(prev => {
+      return prev.map(r => {
+        // Update all rows with the source URL that have a URL-level rec (unless overridden)
+        if (r.url === sourceUrl && URL_LEVEL_RECS.includes(r.recommendation) && !r.overridden) {
+          return { ...r, targetUrl, action: generateActionText(r.recommendation, r.keyword, targetUrl) }
+        }
+        // Auto-set the target URL's row for this keyword to Optimize
+        if (r.keyword === keyword && r.url === targetUrl && !r.recommendation) {
+          return { ...r, recommendation: 'Optimize', action: `Target page — receives traffic from ${sourceUrl}` }
+        }
+        return r
+      })
+    })
+  }
+
+  function handleActionChange(keyword: string, url: string, action: string) {
+    setRows(prev => prev.map(r =>
+      r.keyword === keyword && r.url === url ? { ...r, action } : r
+    ))
+  }
+
+  function handleOverrideToggle(keyword: string, url: string) {
+    setRows(prev => prev.map(r =>
+      r.keyword === keyword && r.url === url ? { ...r, overridden: !r.overridden } : r
+    ))
   }
 
   function handleNotesChange(keyword: string, url: string, notes: string) {
     setRows(prev => prev.map(row => row.keyword === keyword && row.url === url ? { ...row, notes } : row))
   }
 
-  // Delete entire keyword group from the audit
   function handleDeleteKeywordGroup(keyword: string) {
     setRows(prev => prev.filter(r => r.keyword !== keyword))
   }
 
   function handleExportCsv() {
     const eventHeader = activeEvent ? `Event: ${activeEvent}` : 'Key Events'
-    const headers = ['Keyword', 'URL', 'Avg Position', 'Clicks', 'Days Ranked', 'Days Ranked %', 'Cannibal Count',
+    const headers = ['Keyword', 'URL', 'Avg Position', 'Clicks', 'Days Ranked', 'Days Ranked %', 'Audit Appearances',
       ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
       ...(activeEvent ? [eventHeader] : []),
-      'Notes', 'Recommendation']
+      'Notes', 'Recommendation', 'Action', 'Target URL']
     const exportRows = rows.filter(r => r.cannibalizationCount >= 2)
     const csvRows = exportRows.map(r => [
-      r.keyword, r.url, r.position, r.clicks,
+      r.keyword, r.url, Math.round(r.position), r.clicks,
       r.daysRanked !== null ? `${r.daysRanked}/${r.totalDays}` : '',
       r.daysRankedPct !== null ? `${r.daysRankedPct}%` : '',
-      r.cannibalizationCount,
-      ...(csvUploaded ? [r.referringDomains ?? '', r.totalKeywords ?? ''] : []),
-      ...(activeEvent ? [r.keyEvents?.[activeEvent] !== undefined ? r.keyEvents[activeEvent] : ''] : []),
-      r.notes, r.recommendation,
+      urlCompetingCount[r.url] || 1,
+      ...(csvUploaded ? [r.referringDomains ?? 0, r.totalKeywords ?? 0] : []),
+      ...(activeEvent ? [r.keyEvents?.[activeEvent] !== undefined ? r.keyEvents[activeEvent] : 0] : []),
+      r.notes, r.recommendation, r.action, r.targetUrl,
     ])
     const csv = [headers, ...csvRows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
@@ -662,99 +747,134 @@ export default function Home() {
         {/* ── STEP 4: Audit table ── */}
         {wizardStep === 4 && (
           <div className="px-8 pb-8 space-y-4">
-            {/* #2: Stat boxes removed */}
-
             {cannibalGroups.length === 0 ? (
               <div className="text-center py-12" style={{ color: 'var(--color-text-muted)' }}>
                 <p className="text-sm">No cannibalizing keywords found yet. Complete Steps 1 and 2 to see results.</p>
               </div>
             ) : (
               <>
-                <div className="rounded-xl border overflow-x-auto" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
+                {/* Column visibility picker */}
+                <div className="relative">
+                  <button onClick={() => setShowColPicker(!showColPicker)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border hover:opacity-80" style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+                    <ChevronDown className="w-3 h-3" /> Columns ({ALL_COLUMNS.filter(c => isColVisible(c.key) && (c.key !== 'refDomains' && c.key !== 'totalKws' || csvUploaded) && (c.key !== 'keyEvents' || activeEvent)).length})
+                  </button>
+                  {showColPicker && (
+                    <div className="absolute top-full left-0 mt-1 p-2 rounded-lg border shadow-lg z-20 space-y-1 min-w-[180px]" style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)' }}>
+                      {ALL_COLUMNS.filter(c => c.label && (c.key !== 'refDomains' && c.key !== 'totalKws' || csvUploaded) && (c.key !== 'keyEvents' || activeEvent)).map(c => (
+                        <label key={c.key} className="flex items-center gap-2 px-2 py-1 text-xs cursor-pointer hover:opacity-70" style={{ color: 'var(--color-text)' }}>
+                          <input type="checkbox" checked={isColVisible(c.key)} onChange={() => toggleCol(c.key)} className="rounded" />
+                          {c.key === 'keyEvents' ? activeEvent : c.label}
+                        </label>
+                      ))}
+                      <button onClick={() => setShowColPicker(false)} className="w-full text-center text-[10px] pt-1 border-t mt-1 hover:opacity-70" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}>Close</button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border overflow-auto" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)', maxHeight: 'calc(100vh - 180px)' }}>
                   <table className="text-sm w-max min-w-full">
                     <thead className="sticky top-0 z-10">
-                      <tr style={{ background: 'var(--color-surface)', borderBottom: '2px solid var(--color-border-strong)' }}>
-                        {[
-                          'Keyword', 'URL', 'Avg Pos', 'Clicks', 'Days Ranked', 'Audit Appearances',
-                          ...(csvUploaded ? ['Ref Domains', 'Total KWs'] : []),
-                          ...(activeEvent ? [activeEvent] : []),
-                          'Notes', 'Rec', '',
-                        ].map(h => (
-                          <th key={h} className={`text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap ${h === '' ? 'w-8' : ''}`} style={{ color: 'var(--color-text-muted)' }}>{h}</th>
-                        ))}
+                      <tr style={{ background: 'var(--color-surface)', borderBottom: '2px solid var(--color-border-strong)', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
+                        {isColVisible('keyword') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Keyword</th>}
+                        {isColVisible('url') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>URL</th>}
+                        {isColVisible('avgPos') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Avg Pos</th>}
+                        {isColVisible('clicks') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Clicks</th>}
+                        {isColVisible('daysRanked') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Days Ranked</th>}
+                        {isColVisible('auditAppearances') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Audit Appearances</th>}
+                        {csvUploaded && isColVisible('refDomains') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Ref Domains</th>}
+                        {csvUploaded && isColVisible('totalKws') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Total KWs</th>}
+                        {activeEvent && isColVisible('keyEvents') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>{activeEvent}</th>}
+                        {isColVisible('notes') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Notes</th>}
+                        {isColVisible('rec') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Rec</th>}
+                        {isColVisible('action') && <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>Action</th>}
+                        {isColVisible('remove') && <th className="w-6"></th>}
                       </tr>
                     </thead>
                     <tbody>
                       {cannibalGroups.map(([keyword, kwRows]) =>
-                        kwRows.map((row, i) => (
+                        kwRows.map((row, i) => {
+                          const otherUrls = kwRows.filter(r => r.url !== row.url).map(r => r.url)
+                          const showTargetPicker = URL_LEVEL_RECS.includes(row.recommendation)
+                          return (
                           <tr
                             key={`${keyword}-${row.url}-${i}`}
                             style={{ borderBottom: '1px solid var(--color-border)', borderTop: i === 0 ? '3px solid #232323' : undefined }}
                             onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-row-hover)')}
                             onMouseLeave={e => (e.currentTarget.style.background = '')}
                           >
-                            <td className="px-4 py-2.5 font-semibold max-w-[180px]" style={{ color: 'var(--color-text)' }}>
+                            {isColVisible('keyword') && <td className="px-4 py-2.5 font-semibold max-w-[180px]" style={{ color: 'var(--color-text)' }}>
                               <span className="line-clamp-2 text-sm">{keyword}</span>
-                            </td>
-                            <td className="px-4 py-2.5 font-mono text-xs whitespace-nowrap" style={{ color: 'var(--color-text)' }}>
+                            </td>}
+                            {isColVisible('url') && <td className="px-4 py-2.5 font-mono text-xs whitespace-nowrap" style={{ color: 'var(--color-text)' }}>
                               /{row.url.split('/').slice(1).join('/')}
-                            </td>
-                            <td className="px-4 py-2.5 text-center text-sm font-mono" style={{ color: 'var(--color-text)' }}>
+                            </td>}
+                            {isColVisible('avgPos') && <td className="px-4 py-2.5 text-center text-sm font-mono" style={{ color: 'var(--color-text)' }}>
                               {Math.round(row.position)}
-                            </td>
-                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                            </td>}
+                            {isColVisible('clicks') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
                               {row.clicks.toLocaleString()}
-                            </td>
-                            <td className="px-4 py-2.5 text-center whitespace-nowrap">
+                            </td>}
+                            {isColVisible('daysRanked') && <td className="px-4 py-2.5 text-center whitespace-nowrap">
                               {row.daysRankedPct !== null ? (
                                 <div className="flex flex-col items-center gap-0.5">
-                                  <span className="text-xs font-semibold" style={{ color: 'var(--color-text)' }}>
-                                    {row.daysRankedPct}%
-                                  </span>
+                                  <span className="text-xs font-semibold" style={{ color: 'var(--color-text)' }}>{row.daysRankedPct}%</span>
                                   <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{row.daysRanked}/{row.totalDays}d</span>
                                   <div className="w-12 h-1 rounded-full overflow-hidden" style={{ background: 'var(--color-border)' }}>
                                     <div className="h-full rounded-full bg-[#232323]" style={{ width: `${Math.min(100, row.daysRankedPct)}%` }} />
                                   </div>
                                 </div>
                               ) : <span style={{ color: 'var(--color-text)' }}>0%</span>}
-                            </td>
-                            <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                            </td>}
+                            {isColVisible('auditAppearances') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
                               {urlCompetingCount[row.url] || 1}
-                            </td>
-                            {csvUploaded && (
-                              <>
-                                <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.referringDomains !== null ? row.referringDomains.toLocaleString() : '0'}</td>
-                                <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.totalKeywords !== null ? row.totalKeywords.toLocaleString() : '0'}</td>
-                              </>
-                            )}
-                            {activeEvent && (
-                              <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                                {row.keyEvents?.[activeEvent] !== undefined ? row.keyEvents[activeEvent].toLocaleString() : '0'}
-                              </td>
-                            )}
-                            <td className="px-4 py-2 min-w-[140px]">
+                            </td>}
+                            {csvUploaded && isColVisible('refDomains') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.referringDomains !== null ? row.referringDomains.toLocaleString() : '0'}</td>}
+                            {csvUploaded && isColVisible('totalKws') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.totalKeywords !== null ? row.totalKeywords.toLocaleString() : '0'}</td>}
+                            {activeEvent && isColVisible('keyEvents') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                              {row.keyEvents?.[activeEvent] !== undefined ? row.keyEvents[activeEvent].toLocaleString() : '0'}
+                            </td>}
+                            {isColVisible('notes') && <td className="px-4 py-2 min-w-[140px]">
                               <input type="text" value={row.notes} onChange={e => handleNotesChange(keyword, row.url, e.target.value)} placeholder="Add note..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
-                            </td>
-                            <td className="px-4 py-2 min-w-[130px]">
-                              <select value={row.recommendation} onChange={e => handleRecChange(row.url, e.target.value as Recommendation)} className={`w-full rounded-lg px-2 py-1.5 text-xs font-medium cursor-pointer outline-none ${REC_STYLES[row.recommendation]}`}>
-                                {RECOMMENDATIONS.map(r => <option key={r} value={r}>{r || 'Set rec...'}</option>)}
-                              </select>
-                            </td>
-                            <td className="px-1 py-2 w-6">
+                            </td>}
+                            {isColVisible('rec') && <td className="px-4 py-2 min-w-[130px]">
+                              <div className="space-y-1">
+                                <select value={row.recommendation} onChange={e => handleRecChange(keyword, row.url, e.target.value as Recommendation)} className={`w-full rounded-lg px-2 py-1.5 text-xs font-medium cursor-pointer outline-none ${REC_STYLES[row.recommendation]}`}>
+                                  {RECOMMENDATIONS.map(r => <option key={r} value={r}>{r || 'Set rec...'}</option>)}
+                                </select>
+                                {showTargetPicker && (
+                                  <select value={row.targetUrl} onChange={e => handleTargetUrlChange(keyword, row.url, e.target.value)} className="w-full rounded px-1.5 py-1 text-[10px] outline-none" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
+                                    <option value="">Target URL...</option>
+                                    {otherUrls.map(u => <option key={u} value={u}>/{u.split('/').slice(1).join('/')}</option>)}
+                                  </select>
+                                )}
+                                {row.overridden && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">overridden</span>}
+                                {URL_LEVEL_RECS.includes(row.recommendation) && !row.overridden && (
+                                  <button onClick={() => handleOverrideToggle(keyword, row.url)} className="text-[9px] hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>override</button>
+                                )}
+                                {row.overridden && (
+                                  <button onClick={() => handleOverrideToggle(keyword, row.url)} className="text-[9px] hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>remove override</button>
+                                )}
+                              </div>
+                            </td>}
+                            {isColVisible('action') && <td className="px-4 py-2 min-w-[200px]">
+                              <input type="text" value={row.action} onChange={e => handleActionChange(keyword, row.url, e.target.value)} placeholder="Action will auto-fill..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
+                            </td>}
+                            {isColVisible('remove') && <td className="px-1 py-2 w-6">
                               {i === 0 && (
                                 <button onClick={() => handleDeleteKeywordGroup(keyword)} className="opacity-20 hover:opacity-80 transition-opacity" title="Remove this keyword from the audit">
                                   <X className="w-3 h-3" style={{ color: 'var(--color-text)' }} />
                                 </button>
                               )}
-                            </td>
+                            </td>}
                           </tr>
-                        ))
+                          )
+                        })
                       )}
                     </tbody>
                   </table>
                 </div>
 
-                {/* #10: Save audit */}
+                {/* Save audit */}
                 {supabase && (
                   <div className="flex items-center gap-3 pt-4">
                     <input type="text" value={auditName} onChange={e => setAuditName(e.target.value)} placeholder="Audit name (e.g. Rho Q1 2026)" className="px-3 py-2 text-sm rounded-lg outline-none max-w-[260px] w-full" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }} />

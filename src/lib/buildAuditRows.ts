@@ -57,6 +57,9 @@ export function buildAuditRows(
         keyEvents: null,
         notes: '',
         recommendation: '',
+        action: '',
+        targetUrl: '',
+        overridden: false,
       })
     }
   }
