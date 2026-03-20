@@ -288,7 +288,7 @@ export default function Home() {
     setGscError(null)
     try {
       const controller = new AbortController()
-      const timeoutMs = gscDateRange <= 30 ? 55000 : 110000
+      const timeoutMs = gscDateRange <= 30 ? 90000 : 115000
       const timer = setTimeout(() => controller.abort(), timeoutMs)
       const res = await fetch('/api/gsc/query', {
         method: 'POST',

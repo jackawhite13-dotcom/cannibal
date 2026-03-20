@@ -55,30 +55,36 @@ export async function POST(req: NextRequest) {
   // Build keyword set for filtering (lowercase for matching)
   const keywordSet = new Set((keywords as string[]).map((k: string) => k.toLowerCase().trim()))
 
-  // Call 1: query+page → all URLs + avg position + clicks (fast, one call)
+  // Call 1: query+page → all URLs + avg position + clicks (paginated)
   const keywordUrlData: Record<string, { clicks: number; position: number }> = {}
-  try {
-    const res = await gscFetch(siteUrl, session.access_token, {
-      ...baseParams,
-      dimensions: ['query', 'page'],
-      startRow: 0,
-    })
-    if (res.ok) {
-      const data = await res.json()
-      for (const row of (data.rows || []) as { keys: string[]; clicks: number; position: number }[]) {
-        const query = row.keys[0].toLowerCase().trim()
-        // Only keep rows that match our Ahrefs keyword list
-        if (keywordSet.size === 0 || keywordSet.has(query)) {
-          const key = `${row.keys[0]}||${normalizeUrl(row.keys[1])}`
-          keywordUrlData[key] = {
-            clicks: row.clicks,
-            position: Math.round(row.position * 10) / 10,
+  {
+    let startRow = 0
+    for (let batch = 0; batch < 4; batch++) {
+      try {
+        const res = await gscFetch(siteUrl, session.access_token, {
+          ...baseParams,
+          dimensions: ['query', 'page'],
+          startRow,
+        })
+        if (!res.ok) break
+        const data = await res.json()
+        const batchRows = (data.rows || []) as { keys: string[]; clicks: number; position: number }[]
+        for (const row of batchRows) {
+          const query = row.keys[0].toLowerCase().trim()
+          if (keywordSet.size === 0 || keywordSet.has(query)) {
+            const key = `${row.keys[0]}||${normalizeUrl(row.keys[1])}`
+            keywordUrlData[key] = {
+              clicks: row.clicks,
+              position: Math.round(row.position * 10) / 10,
+            }
           }
         }
+        if (batchRows.length < 25000) break
+        startRow += 25000
+      } catch {
+        break
       }
     }
-  } catch {
-    // non-fatal
   }
 
   // Call 2: query+page+date → days ranked (paginated)
