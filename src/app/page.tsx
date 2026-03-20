@@ -807,11 +807,11 @@ export default function Home() {
                               onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-row-hover)')}
                               onMouseLeave={e => (e.currentTarget.style.background = '')}
                             >
-                              {isColVisible('keyword') && <td className="px-4 py-2.5 font-semibold max-w-[180px]" style={{ color: 'var(--color-text)' }}>
-                                <span className="line-clamp-2 text-sm">{keyword}</span>
+                              {isColVisible('keyword') && <td className="px-4 py-2.5 font-semibold min-w-[160px]" style={{ color: 'var(--color-text)' }}>
+                                <span className="text-sm">{keyword}</span>
                               </td>}
                               {isColVisible('url') && <td className="px-4 py-2.5 font-mono text-xs whitespace-nowrap" style={{ color: 'var(--color-text)' }}>
-                                /{row.url.split('/').slice(1).join('/')}
+                                {row.url}
                               </td>}
                               {isColVisible('avgPos') && <td className="px-4 py-2.5 text-center text-sm font-mono" style={{ color: 'var(--color-text)' }}>
                                 {Math.round(row.position)}
