@@ -230,6 +230,8 @@ export default function Home() {
     }
   }
 
+  const allAuditUrls = [...new Set(cannibalGroups.flatMap(([, g]) => g.map(r => r.url)))]
+
   function handleAhrefsCsv(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
@@ -770,6 +772,10 @@ export default function Home() {
                   )}
                 </div>
 
+                <datalist id="audit-all-urls">
+                  {allAuditUrls.map(u => <option key={u} value={u} />)}
+                </datalist>
+
                 <div className="rounded-xl border overflow-auto" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)', maxHeight: 'calc(100vh - 180px)' }}>
                   <table className="text-sm w-max min-w-full">
                     <thead className="sticky top-0 z-10">
@@ -832,8 +838,8 @@ export default function Home() {
                               {activeEvent && isColVisible('keyEvents') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
                                 {row.keyEvents?.[activeEvent] !== undefined ? row.keyEvents[activeEvent].toLocaleString() : '0'}
                               </td>}
-                              {isColVisible('notes') && <td className="px-4 py-2 min-w-[140px]">
-                                <input type="text" value={row.notes} onChange={e => handleNotesChange(keyword, row.url, e.target.value)} placeholder="Add note..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
+                              {isColVisible('notes') && <td className="px-4 py-2 min-w-[160px]">
+                                <textarea rows={2} value={row.notes} onChange={e => handleNotesChange(keyword, row.url, e.target.value)} placeholder="Add note..." className="w-full bg-transparent text-xs py-1 outline-none resize-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)', lineHeight: '1.4' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
                               </td>}
                               {isColVisible('rec') && <td className="px-4 py-2 min-w-[130px]">
                                 <div className="space-y-1">
@@ -841,10 +847,15 @@ export default function Home() {
                                     {RECOMMENDATIONS.map(r => <option key={r} value={r}>{r || 'Set rec...'}</option>)}
                                   </select>
                                   {showTargetPicker && (
-                                    <select value={row.targetUrl} onChange={e => handleTargetUrlChange(keyword, row.url, e.target.value)} className="w-full rounded px-1.5 py-1 text-[10px] outline-none" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
-                                      <option value="">Target URL...</option>
-                                      {otherUrls.map(u => <option key={u} value={u}>/{u.split('/').slice(1).join('/')}</option>)}
-                                    </select>
+                                    <input
+                                      type="text"
+                                      list="audit-all-urls"
+                                      value={row.targetUrl}
+                                      onChange={e => handleTargetUrlChange(keyword, row.url, e.target.value)}
+                                      placeholder="Target URL..."
+                                      className="w-full rounded px-1.5 py-1 text-[10px] outline-none"
+                                      style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
+                                    />
                                   )}
                                   {row.overridden && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">overridden</span>}
                                   {URL_LEVEL_RECS.includes(row.recommendation) && !row.overridden && (
@@ -855,8 +866,8 @@ export default function Home() {
                                   )}
                                 </div>
                               </td>}
-                              {isColVisible('action') && <td className="px-4 py-2 min-w-[200px]">
-                                <input type="text" value={row.action} onChange={e => handleActionChange(keyword, row.url, e.target.value)} placeholder="Action will auto-fill..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
+                              {isColVisible('action') && <td className="px-4 py-2 min-w-[220px]">
+                                <textarea rows={3} value={row.action} onChange={e => handleActionChange(keyword, row.url, e.target.value)} placeholder="Action will auto-fill..." className="w-full bg-transparent text-xs py-1 outline-none resize-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)', lineHeight: '1.4' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
                               </td>}
                               {isColVisible('remove') && <td className="px-1 py-2 w-6">
                                 {i === 0 && (
