@@ -87,42 +87,42 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Call 2: query+page+date → days ranked (paginated)
-  const allDateRows: { keys: string[] }[] = []
-  let startRow = 0
-  const maxBatches = 4
+  // Call 2: one targeted call per matched keyword → days ranked
+  // Fetching all-site query+page+date would require millions of rows for large sites.
+  // Instead, filter by each keyword individually — guaranteed complete regardless of site size.
+  const matchedKeywords = [...new Set(Object.keys(keywordUrlData).map(k => k.split('||')[0]))]
+  const countryCode = country && COUNTRY_CODES[country] ? COUNTRY_CODES[country] : null
 
-  for (let batch = 0; batch < maxBatches; batch++) {
-    let res
-    try {
-      res = await gscFetch(siteUrl, session.access_token, {
-        ...baseParams,
-        dimensions: ['query', 'page', 'date'],
-        startRow,
-      })
-    } catch (e: unknown) {
-      // If the date call fails, we still return what we have from call 1
-      break
-    }
-
-    if (!res.ok) break
-
-    const data = await res.json()
-    const rows = data.rows || []
-    allDateRows.push(...rows)
-    if (rows.length < 25000) break
-    startRow += 25000
-  }
-
-  // Count unique dates per keyword-url pair (only for our keywords)
   const dateSetMap: Record<string, Set<string>> = {}
-  for (const row of allDateRows) {
-    const query = row.keys[0].toLowerCase().trim()
-    if (keywordSet.size === 0 || keywordSet.has(query)) {
-      const key = `${row.keys[0]}||${normalizeUrl(row.keys[1])}`
-      if (!dateSetMap[key]) dateSetMap[key] = new Set()
-      dateSetMap[key].add(row.keys[2])
-    }
+
+  const BATCH_SIZE = 10
+  for (let i = 0; i < matchedKeywords.length; i += BATCH_SIZE) {
+    const batch = matchedKeywords.slice(i, i + BATCH_SIZE)
+    await Promise.all(batch.map(async (keyword) => {
+      const filters: { dimension: string; operator: string; expression: string }[] = [
+        { dimension: 'query', operator: 'equals', expression: keyword },
+        ...(countryCode ? [{ dimension: 'country', operator: 'equals', expression: countryCode }] : []),
+      ]
+      try {
+        const res = await gscFetch(siteUrl, session.access_token as string, {
+          startDate, endDate,
+          rowLimit: 25000,
+          dataState: 'final',
+          dimensions: ['query', 'page', 'date'],
+          dimensionFilterGroups: [{ filters }],
+          startRow: 0,
+        })
+        if (!res.ok) return
+        const data = await res.json()
+        for (const row of (data.rows || []) as { keys: string[] }[]) {
+          const key = `${row.keys[0]}||${normalizeUrl(row.keys[1])}`
+          if (!dateSetMap[key]) dateSetMap[key] = new Set()
+          dateSetMap[key].add(row.keys[2])
+        }
+      } catch {
+        // non-fatal per keyword
+      }
+    }))
   }
 
   const daysMap: Record<string, number> = {}
