@@ -7,9 +7,9 @@ import { buildAuditRows, enrichWithTopPages } from '@/lib/buildAuditRows'
 import { parseAhrefsCsv } from '@/lib/parseAhrefsCsv'
 import { parseTopPagesCsv } from '@/lib/parseTopPages'
 import { supabase } from '@/lib/supabase'
-import { Download, Upload, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, ChevronRight, X, Save } from 'lucide-react'
+import { Download, Upload, AlertTriangle, ChevronDown, LogIn, LogOut, RefreshCw, Check, X, Save } from 'lucide-react'
 
-type WizardStep = 1 | 2 | 3 | 4 | 'methodology'
+type View = 'setup' | 'audit' | 'methodology'
 
 const RECOMMENDATIONS: Recommendation[] = [
   '', '301 Redirect', 'De-optimize', 'Consolidate', 'Optimize', 'No Action', 'Custom',
@@ -25,7 +25,6 @@ const REC_STYLES: Record<string, string> = {
   '': 'bg-[rgba(248,214,185,0.3)] text-[rgba(35,35,35,0.4)]',
 }
 
-// URL-level recs propagate to all rows with the same URL
 const URL_LEVEL_RECS: Recommendation[] = ['301 Redirect', 'Consolidate']
 
 function generateActionText(rec: Recommendation, keyword: string, targetUrl: string): string {
@@ -55,7 +54,6 @@ const ALL_COLUMNS = [
   { key: 'action', label: 'Action' },
   { key: 'remove', label: '' },
 ] as const
-
 
 interface Ga4Property { propertyId: string; displayName: string }
 interface SavedAudit { id: string; name: string; created_at: string; row_count: number }
@@ -91,41 +89,41 @@ const GA4_CHANNELS = [
 
 export default function Home() {
   const { data: session, status } = useSession()
-  const [wizardStep, setWizardStep] = useState<WizardStep>(1)
+  const [view, setView] = useState<View>('setup')
 
-  // Step 1 — Ahrefs CSV
+  // Ahrefs
   const [ahrefsKeywords, setAhrefsKeywords] = useState<string[]>([])
   const ahrefsCsvRef = useRef<HTMLInputElement>(null)
-
-  // Step 1 — Top Pages CSV (optional)
   const [topPages, setTopPages] = useState<Record<string, TopPageRow>>({})
   const [csvUploaded, setCsvUploaded] = useState(false)
   const topPagesCsvRef = useRef<HTMLInputElement>(null)
 
-  // Step 2 — GSC
+  // GSC
   const [sites, setSites] = useState<GscSite[]>([])
   const [selectedSite, setSelectedSite] = useState('')
   const [gscDateRange, setGscDateRange] = useState(30)
   const [gscCountry, setGscCountry] = useState('')
-  const [gscLoading, setGscLoading] = useState(false)
-  const [gscError, setGscError] = useState<string | null>(null)
-  const [rows, setRows] = useState<AuditRow[]>([])
 
-  // Step 3 — GA4
+  // GA4
   const [ga4Properties, setGa4Properties] = useState<Ga4Property[]>([])
   const [selectedGa4Property, setSelectedGa4Property] = useState('')
   const [ga4EventNames, setGa4EventNames] = useState<string[]>([])
   const [selectedEvent, setSelectedEvent] = useState('')
   const [activeEvent, setActiveEvent] = useState('')
-  const [ga4Loading, setGa4Loading] = useState(false)
   const [ga4PropertiesLoading, setGa4PropertiesLoading] = useState(false)
-  const [ga4Error, setGa4Error] = useState<string | null>(null)
-  const [ga4MatchCount, setGa4MatchCount] = useState<number | null>(null)
+  const ga4LoadAttempted = useRef(false)
   const [ga4DateRange, setGa4DateRange] = useState(90)
   const [ga4Country, setGa4Country] = useState('')
   const [ga4ChannelGroup, setGa4ChannelGroup] = useState('')
+  const [ga4MatchCount, setGa4MatchCount] = useState<number | null>(null)
 
-  // Column visibility
+  // Run state
+  const [running, setRunning] = useState(false)
+  const [runStatus, setRunStatus] = useState('')
+  const [runError, setRunError] = useState<string | null>(null)
+
+  // Audit
+  const [rows, setRows] = useState<AuditRow[]>([])
   const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set())
   const [showColPicker, setShowColPicker] = useState(false)
   const toggleCol = (key: string) => setHiddenCols(prev => {
@@ -135,28 +133,27 @@ export default function Home() {
   })
   const isColVisible = (key: string) => !hiddenCols.has(key)
 
-  // Supabase saved audits
+  // Supabase
   const [savedAudits, setSavedAudits] = useState<SavedAudit[]>([])
   const [auditName, setAuditName] = useState('')
   const [saving, setSaving] = useState(false)
 
-  // Restore data after Google sign-in redirect
+  // Restore after Google OAuth redirect — always return to setup
   useEffect(() => {
     try {
       const saved = sessionStorage.getItem('cannibal-state')
       if (saved) {
-        const { keywords, tp, tpDone, step } = JSON.parse(saved)
+        const { keywords, tp, tpDone } = JSON.parse(saved)
         if (keywords?.length > 0) {
           setAhrefsKeywords(keywords)
           if (tp) { setTopPages(tp); setCsvUploaded(tpDone || false) }
-          setWizardStep(step || 2)
         }
         sessionStorage.removeItem('cannibal-state')
       }
     } catch {}
   }, [])
 
-  // Load GSC sites when authenticated (not gated to step 2 — #3 free nav)
+  // Load GSC sites when authenticated
   useEffect(() => {
     if (session?.access_token && sites.length === 0) {
       fetch('/api/gsc/sites')
@@ -170,24 +167,24 @@ export default function Home() {
     }
   }, [session])
 
-  // Load GA4 properties when authenticated (not gated to step 3 — #3 free nav)
+  // Load GA4 properties when authenticated
   useEffect(() => {
-    if (session?.access_token && ga4Properties.length === 0 && !ga4PropertiesLoading && !ga4Error) {
+    if (session?.access_token && ga4Properties.length === 0 && !ga4PropertiesLoading && !ga4LoadAttempted.current) {
+      ga4LoadAttempted.current = true
       setGa4PropertiesLoading(true)
       fetch('/api/ga4/properties')
         .then(r => r.json())
         .then(data => {
-          if (data.error) { setGa4Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error)); return }
           const props: Ga4Property[] = data.properties || []
           setGa4Properties(props)
           if (props.length > 0) setSelectedGa4Property(props[0].propertyId)
         })
-        .catch(e => setGa4Error(e.message))
+        .catch(() => {})
         .finally(() => setGa4PropertiesLoading(false))
     }
   }, [session])
 
-  // Load GA4 event names when property changes
+  // Load GA4 events when property changes
   useEffect(() => {
     if (!selectedGa4Property) return
     setGa4EventNames([])
@@ -199,14 +196,13 @@ export default function Home() {
     })
       .then(r => r.json())
       .then(data => {
-        if (data.error) { setGa4Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error)); return }
         setGa4EventNames(data.eventNames || [])
         setSelectedEvent(data.eventNames?.[0] || '')
       })
-      .catch(e => setGa4Error(e.message))
+      .catch(() => {})
   }, [selectedGa4Property])
 
-  // #10: Load saved audits from Supabase
+  // Load saved audits
   const loadSavedAudits = useCallback(async () => {
     if (!supabase) return
     const { data } = await supabase
@@ -218,7 +214,7 @@ export default function Home() {
 
   useEffect(() => { loadSavedAudits() }, [loadSavedAudits])
 
-  // #1: Filter grouped keywords to only 2+ URL groups
+  // Grouped data for audit table
   const groupedByKeyword = rows.reduce((acc, row) => {
     if (!acc[row.keyword]) acc[row.keyword] = []
     acc[row.keyword].push(row)
@@ -227,7 +223,6 @@ export default function Home() {
 
   const cannibalGroups = Object.entries(groupedByKeyword).filter(([, g]) => g.length >= 2)
 
-  // URLs competing = how many keyword groups this URL appears in across the entire audit
   const urlCompetingCount: Record<string, number> = {}
   for (const [, g] of cannibalGroups) {
     for (const row of g) {
@@ -248,8 +243,7 @@ export default function Home() {
       } else {
         text = new TextDecoder('utf-8').decode(buf)
       }
-      const keywords = parseAhrefsCsv(text)
-      setAhrefsKeywords(keywords)
+      setAhrefsKeywords(parseAhrefsCsv(text))
     }
     reader.readAsArrayBuffer(file)
   }
@@ -263,89 +257,103 @@ export default function Home() {
       const { map: parsed } = parseTopPagesCsv(text)
       setTopPages(parsed)
       setCsvUploaded(true)
-      if (rows.length > 0) {
-        setRows(prev => enrichWithTopPages(prev, parsed))
-      }
+      if (rows.length > 0) setRows(prev => enrichWithTopPages(prev, parsed))
     }
     reader.readAsText(file)
   }
 
-  function handleSignIn(returnToStep: WizardStep) {
+  function handleSignIn() {
     if (ahrefsKeywords.length > 0) {
       sessionStorage.setItem('cannibal-state', JSON.stringify({
         keywords: ahrefsKeywords,
         tp: csvUploaded ? topPages : null,
         tpDone: csvUploaded,
-        step: returnToStep,
       }))
     }
     signIn('google')
   }
 
-  async function handleGscPull() {
+  async function handleRunAudit() {
     if (!selectedSite || ahrefsKeywords.length === 0) return
-    setGscLoading(true)
-    setGscError(null)
+    setRunning(true)
+    setRunError(null)
+    setRunStatus('Pulling Search Console data...')
+
     try {
       const controller = new AbortController()
       const timeoutMs = gscDateRange <= 30 ? 90000 : 115000
       const timer = setTimeout(() => controller.abort(), timeoutMs)
-      const res = await fetch('/api/gsc/query', {
+
+      const gscRes = await fetch('/api/gsc/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ siteUrl: selectedSite, dateRange: gscDateRange, country: gscCountry, keywords: ahrefsKeywords }),
         signal: controller.signal,
       })
       clearTimeout(timer)
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to fetch GSC data')
-      const built = buildAuditRows(data.keywordUrlData || {}, data.daysMap || {}, data.totalDays, ahrefsKeywords, csvUploaded ? topPages : undefined)
+
+      const gscData = await gscRes.json()
+      if (!gscRes.ok) throw new Error(gscData.error || 'Failed to fetch GSC data')
+
+      let built = buildAuditRows(
+        gscData.keywordUrlData || {},
+        gscData.daysMap || {},
+        gscData.totalDays,
+        ahrefsKeywords,
+        csvUploaded ? topPages : undefined,
+      )
+
+      // Optional GA4 enrichment — non-fatal if it fails
+      if (selectedGa4Property && selectedEvent) {
+        setRunStatus('Pulling GA4 key events...')
+        try {
+          const ga4Res = await fetch('/api/ga4/events', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              propertyId: selectedGa4Property,
+              eventName: selectedEvent,
+              dateRange: ga4DateRange,
+              country: ga4Country || undefined,
+              channelGroup: ga4ChannelGroup || undefined,
+            }),
+          })
+          const ga4Data = await ga4Res.json()
+          if (ga4Res.ok) {
+            const pathMap: Record<string, number> = ga4Data.pathMap || {}
+            let matched = 0
+            built = built.map(row => {
+              const path = '/' + row.url.replace(/^[^/]+/, '').replace(/^\//, '')
+              const pathNorm = path.replace(/\/$/, '') || '/'
+              const count = pathMap[pathNorm] ?? null
+              if (count !== null) matched++
+              return { ...row, keyEvents: count !== null ? { [selectedEvent]: count } : row.keyEvents }
+            })
+            setActiveEvent(selectedEvent)
+            setGa4MatchCount(matched)
+          }
+        } catch {
+          // swallow — show audit without GA4
+        }
+      } else {
+        setActiveEvent('')
+        setGa4MatchCount(null)
+      }
+
       setRows(built)
-      setWizardStep(4)
+      setView('audit')
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Unknown error'
-      setGscError(msg.includes('abort') ? 'Request timed out. Try 30 days or a smaller keyword list.' : msg)
+      setRunError(msg.includes('abort') ? 'Request timed out. Try 30 days or a smaller keyword list.' : msg)
     } finally {
-      setGscLoading(false)
-    }
-  }
-
-  async function handleAddEvents() {
-    if (!selectedGa4Property || !selectedEvent) return
-    setGa4Loading(true)
-    try {
-      const res = await fetch('/api/ga4/events', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ propertyId: selectedGa4Property, eventName: selectedEvent, dateRange: ga4DateRange, country: ga4Country || undefined, channelGroup: ga4ChannelGroup || undefined }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error))
-      const pathMap: Record<string, number> = data.pathMap || {}
-      setActiveEvent(selectedEvent)
-      let matched = 0
-      setRows(prev => prev.map(row => {
-        const path = '/' + row.url.replace(/^[^/]+/, '').replace(/^\//, '')
-        const pathNorm = path.replace(/\/$/, '') || '/'
-        const count = pathMap[pathNorm] ?? null
-        if (count !== null) matched++
-        return { ...row, keyEvents: count !== null ? { ...(row.keyEvents || {}), [selectedEvent]: count } : row.keyEvents }
-      }))
-      setGa4MatchCount(matched)
-      setWizardStep(4)
-    } catch (e: unknown) {
-      setGa4Error(e instanceof Error ? e.message : 'Unknown error')
-    } finally {
-      setGa4Loading(false)
+      setRunning(false)
+      setRunStatus('')
     }
   }
 
   function handleRecChange(keyword: string, url: string, rec: Recommendation) {
     setRows(prev => {
-      const actionText = generateActionText(rec, keyword, '')
-
       if (URL_LEVEL_RECS.includes(rec)) {
-        // Propagate to all rows with same URL (unless overridden)
         return prev.map(r => {
           if (r.url === url && !r.overridden) {
             return { ...r, recommendation: rec, action: generateActionText(rec, r.keyword, ''), targetUrl: '' }
@@ -353,27 +361,24 @@ export default function Home() {
           return r
         })
       }
-      // Row-level: only this keyword+url pair
       return prev.map(r =>
-        r.keyword === keyword && r.url === url ? { ...r, recommendation: rec, action: actionText, targetUrl: '' } : r
+        r.keyword === keyword && r.url === url
+          ? { ...r, recommendation: rec, action: generateActionText(rec, keyword, ''), targetUrl: '' }
+          : r
       )
     })
   }
 
   function handleTargetUrlChange(keyword: string, sourceUrl: string, targetUrl: string) {
-    setRows(prev => {
-      return prev.map(r => {
-        // Update all rows with the source URL that have a URL-level rec (unless overridden)
-        if (r.url === sourceUrl && URL_LEVEL_RECS.includes(r.recommendation) && !r.overridden) {
-          return { ...r, targetUrl, action: generateActionText(r.recommendation, r.keyword, targetUrl) }
-        }
-        // Auto-set the target URL's row for this keyword to Optimize
-        if (r.keyword === keyword && r.url === targetUrl && !r.recommendation) {
-          return { ...r, recommendation: 'Optimize', action: `Target page — receives traffic from ${sourceUrl}` }
-        }
-        return r
-      })
-    })
+    setRows(prev => prev.map(r => {
+      if (r.url === sourceUrl && URL_LEVEL_RECS.includes(r.recommendation) && !r.overridden) {
+        return { ...r, targetUrl, action: generateActionText(r.recommendation, r.keyword, targetUrl) }
+      }
+      if (r.keyword === keyword && r.url === targetUrl && !r.recommendation) {
+        return { ...r, recommendation: 'Optimize', action: `Target page — receives traffic from ${sourceUrl}` }
+      }
+      return r
+    }))
   }
 
   function handleActionChange(keyword: string, url: string, action: string) {
@@ -389,7 +394,7 @@ export default function Home() {
   }
 
   function handleNotesChange(keyword: string, url: string, notes: string) {
-    setRows(prev => prev.map(row => row.keyword === keyword && row.url === url ? { ...row, notes } : row))
+    setRows(prev => prev.map(r => r.keyword === keyword && r.url === url ? { ...r, notes } : r))
   }
 
   function handleDeleteKeywordGroup(keyword: string) {
@@ -422,7 +427,6 @@ export default function Home() {
     a.click()
   }
 
-  // #10: Save audit to Supabase
   async function handleSaveAudit() {
     if (!supabase || !auditName.trim()) return
     setSaving(true)
@@ -435,14 +439,10 @@ export default function Home() {
       site: selectedSite,
       active_event: activeEvent || null,
     })
-    if (!error) {
-      setAuditName('')
-      loadSavedAudits()
-    }
+    if (!error) { setAuditName(''); loadSavedAudits() }
     setSaving(false)
   }
 
-  // #10: Load a saved audit
   async function handleLoadAudit(id: string) {
     if (!supabase) return
     const { data } = await supabase.from('cannibal_audits').select('*').eq('id', id).single()
@@ -451,23 +451,11 @@ export default function Home() {
       setAhrefsKeywords(data.keywords || [])
       setActiveEvent(data.active_event || '')
       if (data.site) setSelectedSite(data.site)
-      setWizardStep(4)
+      setView('audit')
     }
   }
 
-  const stepDone = (s: WizardStep) => {
-    if (s === 1) return ahrefsKeywords.length > 0
-    if (s === 2) return rows.length > 0
-    if (s === 3) return !!activeEvent
-    return false
-  }
-
-  const stepLabel = (s: WizardStep) => {
-    if (s === 1) return 'Ahrefs Keywords'
-    if (s === 2) return 'Search Console'
-    if (s === 3) return 'GA4 Key Events'
-    return 'Audit'
-  }
+  const canRun = ahrefsKeywords.length > 0 && status === 'authenticated' && !!selectedSite && !running
 
   const SelectField = ({ label, value, onChange, options, maxW = 'max-w-[220px]' }: {
     label: string; value: string; onChange: (v: string) => void;
@@ -486,7 +474,8 @@ export default function Home() {
 
   return (
     <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
-      {/* Sidebar */}
+
+      {/* ── Sidebar ── */}
       <div className="w-56 flex-shrink-0 flex flex-col min-h-screen" style={{ background: 'var(--color-sidebar)', borderRight: '1px solid var(--color-sidebar-hover)' }}>
         <div className="h-[3px] bg-gradient-to-r from-[#C3F2D0] via-[#B7EBFF] to-[#FFCADF]" />
         <div className="p-4 border-b" style={{ borderColor: 'var(--color-sidebar-hover)' }}>
@@ -501,35 +490,39 @@ export default function Home() {
           </div>
         </div>
 
-        {/* #3: All steps always clickable */}
         <nav className="flex-1 p-3 space-y-1">
-          {([1, 2, 3, 4] as const).map(s => (
-            <button
-              key={s}
-              onClick={() => setWizardStep(s)}
-              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${wizardStep === s ? 'font-semibold border-l-2 border-[#232323]' : 'hover:opacity-70'}`}
-              style={{ background: wizardStep === s ? 'rgba(248,214,185,0.6)' : 'transparent', color: 'var(--color-text)' }}
-            >
-              <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] flex-shrink-0 ${stepDone(s) ? 'bg-[#232323] text-white' : 'border border-current opacity-50'}`}>
-                {stepDone(s) ? <Check className="w-3 h-3" /> : s}
-              </span>
-              <span className="flex-1">{stepLabel(s)}</span>
-              {s <= 2 && <span className="text-[9px] opacity-40 uppercase tracking-wide">req</span>}
-              {s === 3 && <span className="text-[9px] opacity-40 uppercase tracking-wide">opt</span>}
-            </button>
-          ))}
+          {([
+            { key: 'setup', label: 'Setup' },
+            { key: 'audit', label: 'Audit' },
+          ] as { key: View; label: string }[]).map(({ key, label }) => {
+            const done = key === 'setup' ? rows.length > 0 : rows.length > 0
+            const disabled = key === 'audit' && rows.length === 0
+            return (
+              <button
+                key={key}
+                onClick={() => !disabled && setView(key)}
+                disabled={disabled}
+                className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${view === key ? 'font-semibold border-l-2 border-[#232323]' : disabled ? 'opacity-30 cursor-not-allowed' : 'hover:opacity-70'}`}
+                style={{ background: view === key ? 'rgba(248,214,185,0.6)' : 'transparent', color: 'var(--color-text)' }}
+              >
+                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] flex-shrink-0 ${done && key === 'audit' ? 'bg-[#232323] text-white' : 'border border-current opacity-50'}`}>
+                  {done && key === 'audit' ? <Check className="w-3 h-3" /> : key === 'setup' ? '1' : '2'}
+                </span>
+                <span>{label}</span>
+              </button>
+            )
+          })}
           <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-sidebar-hover)' }}>
             <button
-              onClick={() => setWizardStep('methodology')}
-              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${wizardStep === 'methodology' ? 'font-semibold border-l-2 border-[#232323]' : 'hover:opacity-70'}`}
-              style={{ background: wizardStep === 'methodology' ? 'rgba(248,214,185,0.6)' : 'transparent', color: 'var(--color-text)' }}
+              onClick={() => setView('methodology')}
+              className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-left ${view === 'methodology' ? 'font-semibold border-l-2 border-[#232323]' : 'hover:opacity-70'}`}
+              style={{ background: view === 'methodology' ? 'rgba(248,214,185,0.6)' : 'transparent', color: 'var(--color-text)' }}
             >
               <span className="flex-1">Methodology</span>
             </button>
           </div>
         </nav>
 
-        {/* #10: Saved audits list */}
         {savedAudits.length > 0 && (
           <div className="px-3 pb-2">
             <div className="text-[10px] uppercase tracking-wide font-semibold mb-2 px-1" style={{ color: 'var(--color-text-muted)' }}>Saved Audits</div>
@@ -557,85 +550,91 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Main */}
+      {/* ── Main ── */}
       <div className="flex-1 overflow-x-hidden flex flex-col">
         <div className="px-8 py-5 flex items-center justify-between border-b" style={{ borderColor: 'var(--color-border-strong)', background: 'var(--color-surface-elevated)' }}>
           <div>
             <h1 className="text-xl font-semibold" style={{ color: 'var(--color-text)' }}>Cannibal Audit Builder</h1>
             <p className="text-sm mt-0.5" style={{ color: 'var(--color-text-muted)' }}>Identify and resolve keyword cannibalization across any domain</p>
           </div>
-          {rows.length > 0 && wizardStep === 4 && (
+          {rows.length > 0 && view === 'audit' && (
             <button onClick={handleExportCsv} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
               <Download className="w-4 h-4" /> Export CSV
             </button>
           )}
         </div>
 
-        <div className="px-8 py-6 space-y-4 max-w-3xl">
+        {/* ── SETUP VIEW ── */}
+        {view === 'setup' && (
+          <div className="px-8 py-6 space-y-5 max-w-2xl">
 
-          {/* ── STEP 1: Ahrefs CSV ── */}
-          {wizardStep === 1 && (
+            {/* Google Account — always first */}
             <div className="card">
-              <div className="flex items-center gap-2 mb-5">
-                <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center text-xs font-bold">1</span>
-                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Ahrefs Keywords</h2>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold" style={{ background: status === 'authenticated' ? '#232323' : 'transparent', color: status === 'authenticated' ? '#fff' : 'var(--color-text)', border: status === 'authenticated' ? 'none' : '1px solid currentColor', opacity: status === 'authenticated' ? 1 : 0.5 }}>
+                  {status === 'authenticated' ? <Check className="w-3 h-3" /> : '1'}
+                </span>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Google Account</h2>
                 <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: '#232323', color: '#fff' }}>Required</span>
               </div>
-              <p className="text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
-                Export your cannibalizing keywords from Ahrefs (with &quot;Multiple URLs only&quot; toggled on) and upload the CSV here.
-              </p>
-              <div className="space-y-4">
+              {status === 'authenticated' ? (
                 <div className="flex items-center gap-3">
-                  <button onClick={() => ahrefsCsvRef.current?.click()} className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium border transition-colors" style={ahrefsKeywords.length > 0 ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
-                    <Upload className="w-4 h-4" />
-                    {ahrefsKeywords.length > 0 ? `${ahrefsKeywords.length} keywords loaded` : 'Upload Ahrefs Organic Keywords CSV'}
-                  </button>
-                  <input ref={ahrefsCsvRef} type="file" accept=".csv" className="hidden" onChange={handleAhrefsCsv} />
-                </div>
-                {ahrefsKeywords.length > 0 && (
-                  <button onClick={() => setWizardStep(2)} className="flex items-center gap-1 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
-                    Next: Search Console <ChevronRight className="w-4 h-4" />
-                  </button>
-                )}
-                <div className="pt-4 border-t" style={{ borderColor: 'var(--color-border)' }}>
-                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>
-                    Ahrefs Top Pages CSV <span className="font-normal">(optional — adds Referring Domains &amp; Total Keywords)</span>
-                  </label>
-                  <div className="flex items-center gap-3">
-                    <button onClick={() => topPagesCsvRef.current?.click()} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors" style={csvUploaded ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
-                      <Upload className="w-4 h-4" />
-                      {csvUploaded ? 'Top Pages loaded' : 'Upload Top Pages CSV'}
-                    </button>
-                    <input ref={topPagesCsvRef} type="file" accept=".csv" className="hidden" onChange={handleTopPagesCsv} />
-                  </div>
-                  <p className="text-[11px] mt-1.5" style={{ color: 'var(--color-text-muted)' }}>In Ahrefs: Site Explorer → Top Pages → Export CSV</p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ── STEP 2: GSC ── */}
-          {wizardStep === 2 && (
-            <div className="card">
-              <div className="flex items-center gap-2 mb-5">
-                <span className="w-6 h-6 rounded-full bg-[#232323] text-white flex items-center justify-center text-xs font-bold">2</span>
-                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Search Console</h2>
-                <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: '#232323', color: '#fff' }}>Required</span>
-              </div>
-              <p className="text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
-                Finds all competing URLs for your {ahrefsKeywords.length || '—'} keywords, plus avg position, clicks, and days ranked.
-              </p>
-              {status !== 'authenticated' ? (
-                <div>
-                  <p className="text-sm mb-3" style={{ color: 'var(--color-text-muted)' }}>Sign in with Google to access Search Console data.</p>
-                  <button onClick={() => handleSignIn(2)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
-                    <LogIn className="w-4 h-4" /> Connect Google Account
+                  <span className="text-sm" style={{ color: 'var(--color-text)' }}>{session.user?.email}</span>
+                  <button onClick={() => signOut()} className="flex items-center gap-1 text-xs hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>
+                    <LogOut className="w-3 h-3" /> Switch account
                   </button>
                 </div>
               ) : (
+                <div>
+                  <p className="text-sm mb-3" style={{ color: 'var(--color-text-muted)' }}>Connect your Google account to access Search Console and GA4.</p>
+                  <button onClick={handleSignIn} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
+                    <LogIn className="w-4 h-4" /> Connect Google Account
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Ahrefs Keywords */}
+            <div className="card">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold" style={{ background: ahrefsKeywords.length > 0 ? '#232323' : 'transparent', color: ahrefsKeywords.length > 0 ? '#fff' : 'var(--color-text)', border: ahrefsKeywords.length > 0 ? 'none' : '1px solid currentColor', opacity: ahrefsKeywords.length > 0 ? 1 : 0.5 }}>
+                  {ahrefsKeywords.length > 0 ? <Check className="w-3 h-3" /> : '2'}
+                </span>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Ahrefs Keywords</h2>
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: '#232323', color: '#fff' }}>Required</span>
+              </div>
+              <p className="text-sm mb-3" style={{ color: 'var(--color-text-muted)' }}>
+                Export from Ahrefs Site Explorer → Organic Keywords → toggle &quot;Multiple URLs only&quot; → Export CSV.
+              </p>
+              <div className="flex items-center gap-3 flex-wrap">
+                <button onClick={() => ahrefsCsvRef.current?.click()} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors" style={ahrefsKeywords.length > 0 ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+                  <Upload className="w-4 h-4" />
+                  {ahrefsKeywords.length > 0 ? `${ahrefsKeywords.length} keywords loaded` : 'Upload Ahrefs Organic Keywords CSV'}
+                </button>
+                <input ref={ahrefsCsvRef} type="file" accept=".csv" className="hidden" onChange={handleAhrefsCsv} />
+                <button onClick={() => topPagesCsvRef.current?.click()} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors" style={csvUploaded ? { background: '#C3F2D0', borderColor: '#86efac', color: '#166534' } : { background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+                  <Upload className="w-4 h-4" />
+                  {csvUploaded ? 'Top Pages loaded' : 'Top Pages CSV'}
+                  <span className="text-[10px] opacity-60">(optional)</span>
+                </button>
+                <input ref={topPagesCsvRef} type="file" accept=".csv" className="hidden" onChange={handleTopPagesCsv} />
+              </div>
+              {csvUploaded && <p className="text-[11px] mt-2" style={{ color: 'var(--color-text-muted)' }}>Top Pages adds Referring Domains &amp; Total Keywords columns.</p>}
+            </div>
+
+            {/* Search Console */}
+            <div className="card">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-6 h-6 rounded-full border flex items-center justify-center text-[10px] font-bold opacity-50" style={{ color: 'var(--color-text)' }}>3</span>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Search Console</h2>
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold" style={{ background: '#232323', color: '#fff' }}>Required</span>
+              </div>
+              {status !== 'authenticated' ? (
+                <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>Connect your Google account above to select a GSC property.</p>
+              ) : (
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>GSC Property</label>
+                    <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Property</label>
                     <div className="relative max-w-sm">
                       <select value={selectedSite} onChange={e => setSelectedSite(e.target.value)} className="w-full appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
                         {sites.map(s => <option key={s.siteUrl} value={s.siteUrl}>{s.siteUrl}</option>)}
@@ -655,38 +654,23 @@ export default function Home() {
                     </div>
                   </div>
                   <SelectField label="Country" value={gscCountry} onChange={setGscCountry} options={GSC_COUNTRIES} />
-                  <button onClick={handleGscPull} disabled={gscLoading || !selectedSite || ahrefsKeywords.length === 0} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
-                    <RefreshCw className={`w-4 h-4 ${gscLoading ? 'animate-spin' : ''}`} />
-                    {gscLoading ? 'Pulling GSC data... this can take 15-30s' : 'Pull Data'}
-                  </button>
-                  {ahrefsKeywords.length === 0 && <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>Upload Ahrefs keywords in Step 1 first.</p>}
-                  {gscError && <div className="px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{gscError}</div>}
                 </div>
               )}
             </div>
-          )}
 
-          {/* ── STEP 3: GA4 ── */}
-          {wizardStep === 3 && (
+            {/* GA4 Key Events — optional */}
             <div className="card">
-              <div className="flex items-center gap-2 mb-5">
-                <span className="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold" style={{ borderColor: '#232323', color: '#232323' }}>3</span>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-6 h-6 rounded-full border flex items-center justify-center text-[10px] font-bold opacity-50" style={{ color: 'var(--color-text)' }}>4</span>
                 <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>GA4 Key Events</h2>
                 <span className="text-[10px] px-2 py-0.5 rounded-full border font-medium" style={{ borderColor: 'var(--color-border-strong)', color: 'var(--color-text-muted)' }}>Optional</span>
               </div>
               {status !== 'authenticated' ? (
-                <div>
-                  <p className="text-sm mb-3" style={{ color: 'var(--color-text-muted)' }}>Sign in with Google to access GA4 data.</p>
-                  <button onClick={() => handleSignIn(3)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80" style={{ background: '#232323', color: '#fff' }}>
-                    <LogIn className="w-4 h-4" /> Connect Google Account
-                  </button>
-                </div>
+                <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>Connect your Google account above to add GA4 key events.</p>
               ) : ga4PropertiesLoading ? (
-                <div className="flex items-center gap-2 text-sm mb-4" style={{ color: 'var(--color-text-muted)' }}>
+                <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--color-text-muted)' }}>
                   <RefreshCw className="w-4 h-4 animate-spin" /> Loading GA4 properties...
                 </div>
-              ) : ga4Error ? (
-                <div className="mb-4 px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{ga4Error}</div>
               ) : ga4Properties.length > 0 ? (
                 <div className="space-y-4">
                   <div className="flex gap-3 flex-wrap">
@@ -724,50 +708,65 @@ export default function Home() {
                     <SelectField label="Country" value={ga4Country} onChange={setGa4Country} options={[{ label: 'All countries', value: '' }, { label: 'United States', value: 'United States' }, { label: 'United Kingdom', value: 'United Kingdom' }, { label: 'Canada', value: 'Canada' }, { label: 'Australia', value: 'Australia' }, { label: 'Germany', value: 'Germany' }, { label: 'France', value: 'France' }, { label: 'India', value: 'India' }]} />
                     <SelectField label="Channel" value={ga4ChannelGroup} onChange={setGa4ChannelGroup} options={GA4_CHANNELS} />
                   </div>
-                  <button onClick={handleAddEvents} disabled={ga4Loading || !selectedEvent} className="flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed" style={{ background: '#232323', color: '#fff' }}>
-                    <RefreshCw className={`w-4 h-4 ${ga4Loading ? 'animate-spin' : ''}`} />
-                    {ga4Loading ? 'Loading events...' : 'Add Events'}
-                  </button>
+                  <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>If configured, key events will be pulled automatically when you run the audit.</p>
                 </div>
-              ) : null}
-              <div className="mt-5 pt-4 border-t flex items-center justify-between" style={{ borderColor: 'var(--color-border)' }}>
-                <button onClick={() => setWizardStep(4)} className="text-sm hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>
-                  Skip this step →
-                </button>
-                {activeEvent && (
-                  <button onClick={() => setWizardStep(4)} className="flex items-center gap-1 text-sm font-medium" style={{ color: '#232323' }}>
-                    View Audit <ChevronRight className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
+              ) : (
+                <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>No GA4 properties found on this account.</p>
+              )}
             </div>
-          )}
-        </div>
 
-        {/* ── STEP 4: Audit table ── */}
-        {wizardStep === 4 && (
-          <div className="px-8 pb-8 space-y-4">
+            {/* Run Audit */}
+            <div className="space-y-2">
+              <button
+                onClick={handleRunAudit}
+                disabled={!canRun}
+                className="flex items-center gap-2 px-6 py-3 rounded-lg text-sm font-semibold hover:opacity-80 disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{ background: '#232323', color: '#fff' }}
+              >
+                <RefreshCw className={`w-4 h-4 ${running ? 'animate-spin' : ''}`} />
+                {running ? runStatus || 'Running...' : 'Run Audit'}
+              </button>
+              {!canRun && !running && (
+                <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                  {status !== 'authenticated' ? 'Connect Google account first.' : ahrefsKeywords.length === 0 ? 'Upload Ahrefs keywords first.' : !selectedSite ? 'Select a GSC property.' : ''}
+                </p>
+              )}
+              {runError && <div className="px-4 py-3 rounded-lg text-sm text-red-700 bg-red-50 border border-red-200">{runError}</div>}
+            </div>
+          </div>
+        )}
+
+        {/* ── AUDIT VIEW ── */}
+        {view === 'audit' && (
+          <div className="px-8 pb-8 space-y-4 pt-6">
             {cannibalGroups.length === 0 ? (
               <div className="text-center py-12" style={{ color: 'var(--color-text-muted)' }}>
-                <p className="text-sm">No cannibalizing keywords found yet. Complete Steps 1 and 2 to see results.</p>
+                <p className="text-sm">No cannibalizing keywords found. Go to Setup and run the audit.</p>
+                <button onClick={() => setView('setup')} className="mt-3 text-sm underline hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>Back to Setup</button>
               </div>
             ) : (
               <>
-                {/* Column visibility picker */}
-                <div className="relative">
-                  <button onClick={() => setShowColPicker(!showColPicker)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border hover:opacity-80" style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
-                    <ChevronDown className="w-3 h-3" /> Columns ({ALL_COLUMNS.filter(c => isColVisible(c.key) && (c.key !== 'refDomains' && c.key !== 'totalKws' || csvUploaded) && (c.key !== 'keyEvents' || activeEvent)).length})
-                  </button>
-                  {showColPicker && (
-                    <div className="absolute top-full left-0 mt-1 p-2 rounded-lg border shadow-lg z-20 space-y-1 min-w-[180px]" style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)' }}>
-                      {ALL_COLUMNS.filter(c => c.label && (c.key !== 'refDomains' && c.key !== 'totalKws' || csvUploaded) && (c.key !== 'keyEvents' || activeEvent)).map(c => (
-                        <label key={c.key} className="flex items-center gap-2 px-2 py-1 text-xs cursor-pointer hover:opacity-70" style={{ color: 'var(--color-text)' }}>
-                          <input type="checkbox" checked={isColVisible(c.key)} onChange={() => toggleCol(c.key)} className="rounded" />
-                          {c.key === 'keyEvents' ? activeEvent : c.label}
-                        </label>
-                      ))}
-                      <button onClick={() => setShowColPicker(false)} className="w-full text-center text-[10px] pt-1 border-t mt-1 hover:opacity-70" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}>Close</button>
-                    </div>
+                <div className="flex items-center justify-between">
+                  <div className="relative">
+                    <button onClick={() => setShowColPicker(!showColPicker)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border hover:opacity-80" style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+                      <ChevronDown className="w-3 h-3" /> Columns ({ALL_COLUMNS.filter(c => isColVisible(c.key) && (c.key !== 'refDomains' && c.key !== 'totalKws' || csvUploaded) && (c.key !== 'keyEvents' || activeEvent)).length})
+                    </button>
+                    {showColPicker && (
+                      <div className="absolute top-full left-0 mt-1 p-2 rounded-lg border shadow-lg z-20 space-y-1 min-w-[180px]" style={{ background: 'var(--color-surface-elevated)', borderColor: 'var(--color-border)' }}>
+                        {ALL_COLUMNS.filter(c => c.label && (c.key !== 'refDomains' && c.key !== 'totalKws' || csvUploaded) && (c.key !== 'keyEvents' || activeEvent)).map(c => (
+                          <label key={c.key} className="flex items-center gap-2 px-2 py-1 text-xs cursor-pointer hover:opacity-70" style={{ color: 'var(--color-text)' }}>
+                            <input type="checkbox" checked={isColVisible(c.key)} onChange={() => toggleCol(c.key)} className="rounded" />
+                            {c.key === 'keyEvents' ? activeEvent : c.label}
+                          </label>
+                        ))}
+                        <button onClick={() => setShowColPicker(false)} className="w-full text-center text-[10px] pt-1 border-t mt-1 hover:opacity-70" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}>Close</button>
+                      </div>
+                    )}
+                  </div>
+                  {ga4MatchCount !== null && activeEvent && (
+                    <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                      {activeEvent}: matched {ga4MatchCount} URL{ga4MatchCount !== 1 ? 's' : ''}
+                    </span>
                   )}
                 </div>
 
@@ -796,77 +795,77 @@ export default function Home() {
                           const otherUrls = kwRows.filter(r => r.url !== row.url).map(r => r.url)
                           const showTargetPicker = URL_LEVEL_RECS.includes(row.recommendation)
                           return (
-                          <tr
-                            key={`${keyword}-${row.url}-${i}`}
-                            style={{ borderBottom: '1px solid var(--color-border)', borderTop: i === 0 ? '3px solid #232323' : undefined }}
-                            onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-row-hover)')}
-                            onMouseLeave={e => (e.currentTarget.style.background = '')}
-                          >
-                            {isColVisible('keyword') && <td className="px-4 py-2.5 font-semibold max-w-[180px]" style={{ color: 'var(--color-text)' }}>
-                              <span className="line-clamp-2 text-sm">{keyword}</span>
-                            </td>}
-                            {isColVisible('url') && <td className="px-4 py-2.5 font-mono text-xs whitespace-nowrap" style={{ color: 'var(--color-text)' }}>
-                              /{row.url.split('/').slice(1).join('/')}
-                            </td>}
-                            {isColVisible('avgPos') && <td className="px-4 py-2.5 text-center text-sm font-mono" style={{ color: 'var(--color-text)' }}>
-                              {Math.round(row.position)}
-                            </td>}
-                            {isColVisible('clicks') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                              {row.clicks.toLocaleString()}
-                            </td>}
-                            {isColVisible('daysRanked') && <td className="px-4 py-2.5 text-center whitespace-nowrap">
-                              {row.daysRankedPct !== null ? (
-                                <div className="flex flex-col items-center gap-0.5">
-                                  <span className="text-xs font-semibold" style={{ color: 'var(--color-text)' }}>{row.daysRankedPct}%</span>
-                                  <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{row.daysRanked}/{row.totalDays}d</span>
-                                  <div className="w-12 h-1 rounded-full overflow-hidden" style={{ background: 'var(--color-border)' }}>
-                                    <div className="h-full rounded-full bg-[#232323]" style={{ width: `${Math.min(100, row.daysRankedPct)}%` }} />
+                            <tr
+                              key={`${keyword}-${row.url}-${i}`}
+                              style={{ borderBottom: '1px solid var(--color-border)', borderTop: i === 0 ? '3px solid #232323' : undefined }}
+                              onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-row-hover)')}
+                              onMouseLeave={e => (e.currentTarget.style.background = '')}
+                            >
+                              {isColVisible('keyword') && <td className="px-4 py-2.5 font-semibold max-w-[180px]" style={{ color: 'var(--color-text)' }}>
+                                <span className="line-clamp-2 text-sm">{keyword}</span>
+                              </td>}
+                              {isColVisible('url') && <td className="px-4 py-2.5 font-mono text-xs whitespace-nowrap" style={{ color: 'var(--color-text)' }}>
+                                /{row.url.split('/').slice(1).join('/')}
+                              </td>}
+                              {isColVisible('avgPos') && <td className="px-4 py-2.5 text-center text-sm font-mono" style={{ color: 'var(--color-text)' }}>
+                                {Math.round(row.position)}
+                              </td>}
+                              {isColVisible('clicks') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                                {row.clicks.toLocaleString()}
+                              </td>}
+                              {isColVisible('daysRanked') && <td className="px-4 py-2.5 text-center whitespace-nowrap">
+                                {row.daysRankedPct !== null ? (
+                                  <div className="flex flex-col items-center gap-0.5">
+                                    <span className="text-xs font-semibold" style={{ color: 'var(--color-text)' }}>{row.daysRankedPct}%</span>
+                                    <span className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{row.daysRanked}/{row.totalDays}d</span>
+                                    <div className="w-12 h-1 rounded-full overflow-hidden" style={{ background: 'var(--color-border)' }}>
+                                      <div className="h-full rounded-full bg-[#232323]" style={{ width: `${Math.min(100, row.daysRankedPct)}%` }} />
+                                    </div>
                                   </div>
-                                </div>
-                              ) : <span style={{ color: 'var(--color-text)' }}>0%</span>}
-                            </td>}
-                            {isColVisible('auditAppearances') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                              {urlCompetingCount[row.url] || 1}
-                            </td>}
-                            {csvUploaded && isColVisible('refDomains') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.referringDomains !== null ? row.referringDomains.toLocaleString() : '0'}</td>}
-                            {csvUploaded && isColVisible('totalKws') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.totalKeywords !== null ? row.totalKeywords.toLocaleString() : '0'}</td>}
-                            {activeEvent && isColVisible('keyEvents') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
-                              {row.keyEvents?.[activeEvent] !== undefined ? row.keyEvents[activeEvent].toLocaleString() : '0'}
-                            </td>}
-                            {isColVisible('notes') && <td className="px-4 py-2 min-w-[140px]">
-                              <input type="text" value={row.notes} onChange={e => handleNotesChange(keyword, row.url, e.target.value)} placeholder="Add note..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
-                            </td>}
-                            {isColVisible('rec') && <td className="px-4 py-2 min-w-[130px]">
-                              <div className="space-y-1">
-                                <select value={row.recommendation} onChange={e => handleRecChange(keyword, row.url, e.target.value as Recommendation)} className={`w-full rounded-lg px-2 py-1.5 text-xs font-medium cursor-pointer outline-none ${REC_STYLES[row.recommendation]}`}>
-                                  {RECOMMENDATIONS.map(r => <option key={r} value={r}>{r || 'Set rec...'}</option>)}
-                                </select>
-                                {showTargetPicker && (
-                                  <select value={row.targetUrl} onChange={e => handleTargetUrlChange(keyword, row.url, e.target.value)} className="w-full rounded px-1.5 py-1 text-[10px] outline-none" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
-                                    <option value="">Target URL...</option>
-                                    {otherUrls.map(u => <option key={u} value={u}>/{u.split('/').slice(1).join('/')}</option>)}
+                                ) : <span style={{ color: 'var(--color-text)' }}>0%</span>}
+                              </td>}
+                              {isColVisible('auditAppearances') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                                {urlCompetingCount[row.url] || 1}
+                              </td>}
+                              {csvUploaded && isColVisible('refDomains') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.referringDomains !== null ? row.referringDomains.toLocaleString() : '0'}</td>}
+                              {csvUploaded && isColVisible('totalKws') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>{row.totalKeywords !== null ? row.totalKeywords.toLocaleString() : '0'}</td>}
+                              {activeEvent && isColVisible('keyEvents') && <td className="px-4 py-2.5 text-center text-sm" style={{ color: 'var(--color-text)' }}>
+                                {row.keyEvents?.[activeEvent] !== undefined ? row.keyEvents[activeEvent].toLocaleString() : '0'}
+                              </td>}
+                              {isColVisible('notes') && <td className="px-4 py-2 min-w-[140px]">
+                                <input type="text" value={row.notes} onChange={e => handleNotesChange(keyword, row.url, e.target.value)} placeholder="Add note..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
+                              </td>}
+                              {isColVisible('rec') && <td className="px-4 py-2 min-w-[130px]">
+                                <div className="space-y-1">
+                                  <select value={row.recommendation} onChange={e => handleRecChange(keyword, row.url, e.target.value as Recommendation)} className={`w-full rounded-lg px-2 py-1.5 text-xs font-medium cursor-pointer outline-none ${REC_STYLES[row.recommendation]}`}>
+                                    {RECOMMENDATIONS.map(r => <option key={r} value={r}>{r || 'Set rec...'}</option>)}
                                   </select>
+                                  {showTargetPicker && (
+                                    <select value={row.targetUrl} onChange={e => handleTargetUrlChange(keyword, row.url, e.target.value)} className="w-full rounded px-1.5 py-1 text-[10px] outline-none" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
+                                      <option value="">Target URL...</option>
+                                      {otherUrls.map(u => <option key={u} value={u}>/{u.split('/').slice(1).join('/')}</option>)}
+                                    </select>
+                                  )}
+                                  {row.overridden && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">overridden</span>}
+                                  {URL_LEVEL_RECS.includes(row.recommendation) && !row.overridden && (
+                                    <button onClick={() => handleOverrideToggle(keyword, row.url)} className="text-[9px] hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>override</button>
+                                  )}
+                                  {row.overridden && (
+                                    <button onClick={() => handleOverrideToggle(keyword, row.url)} className="text-[9px] hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>remove override</button>
+                                  )}
+                                </div>
+                              </td>}
+                              {isColVisible('action') && <td className="px-4 py-2 min-w-[200px]">
+                                <input type="text" value={row.action} onChange={e => handleActionChange(keyword, row.url, e.target.value)} placeholder="Action will auto-fill..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
+                              </td>}
+                              {isColVisible('remove') && <td className="px-1 py-2 w-6">
+                                {i === 0 && (
+                                  <button onClick={() => handleDeleteKeywordGroup(keyword)} className="opacity-20 hover:opacity-80 transition-opacity" title="Remove this keyword from the audit">
+                                    <X className="w-3 h-3" style={{ color: 'var(--color-text)' }} />
+                                  </button>
                                 )}
-                                {row.overridden && <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">overridden</span>}
-                                {URL_LEVEL_RECS.includes(row.recommendation) && !row.overridden && (
-                                  <button onClick={() => handleOverrideToggle(keyword, row.url)} className="text-[9px] hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>override</button>
-                                )}
-                                {row.overridden && (
-                                  <button onClick={() => handleOverrideToggle(keyword, row.url)} className="text-[9px] hover:opacity-70" style={{ color: 'var(--color-text-muted)' }}>remove override</button>
-                                )}
-                              </div>
-                            </td>}
-                            {isColVisible('action') && <td className="px-4 py-2 min-w-[200px]">
-                              <input type="text" value={row.action} onChange={e => handleActionChange(keyword, row.url, e.target.value)} placeholder="Action will auto-fill..." className="w-full bg-transparent text-xs py-1 outline-none" style={{ borderBottom: '1px solid var(--color-border)', color: 'var(--color-text)' }} onFocus={e => e.target.style.borderBottomColor = '#232323'} onBlur={e => e.target.style.borderBottomColor = 'rgba(248,214,185,0.5)'} />
-                            </td>}
-                            {isColVisible('remove') && <td className="px-1 py-2 w-6">
-                              {i === 0 && (
-                                <button onClick={() => handleDeleteKeywordGroup(keyword)} className="opacity-20 hover:opacity-80 transition-opacity" title="Remove this keyword from the audit">
-                                  <X className="w-3 h-3" style={{ color: 'var(--color-text)' }} />
-                                </button>
-                              )}
-                            </td>}
-                          </tr>
+                              </td>}
+                            </tr>
                           )
                         })
                       )}
@@ -874,9 +873,8 @@ export default function Home() {
                   </table>
                 </div>
 
-                {/* Save audit */}
                 {supabase && (
-                  <div className="flex items-center gap-3 pt-4">
+                  <div className="flex items-center gap-3 pt-2">
                     <input type="text" value={auditName} onChange={e => setAuditName(e.target.value)} placeholder="Audit name (e.g. Rho Q1 2026)" className="px-3 py-2 text-sm rounded-lg outline-none max-w-[260px] w-full" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }} />
                     <button onClick={handleSaveAudit} disabled={saving || !auditName.trim()} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium hover:opacity-80 disabled:opacity-50" style={{ background: '#232323', color: '#fff' }}>
                       <Save className="w-4 h-4" />
@@ -888,8 +886,9 @@ export default function Home() {
             )}
           </div>
         )}
-        {/* ── STEP 5: Methodology ── */}
-        {wizardStep === 'methodology' && (
+
+        {/* ── METHODOLOGY VIEW ── */}
+        {view === 'methodology' && (
           <div className="px-8 py-6 max-w-2xl">
             <div className="card">
               <h2 className="text-lg font-semibold mb-4" style={{ color: 'var(--color-text)' }}>Why You Can Trust This Audit</h2>
