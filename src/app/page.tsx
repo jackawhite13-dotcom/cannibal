@@ -103,6 +103,8 @@ export default function Home() {
   const [selectedSite, setSelectedSite] = useState('')
   const [gscDateRange, setGscDateRange] = useState(30)
   const [gscCountry, setGscCountry] = useState('')
+  const [sitesError, setSitesError] = useState<string | null>(null)
+  const [sitesLoading, setSitesLoading] = useState(false)
 
   // GA4
   const [ga4Properties, setGa4Properties] = useState<Ga4Property[]>([])
@@ -155,15 +157,22 @@ export default function Home() {
 
   // Load GSC sites when authenticated
   useEffect(() => {
-    if (session?.access_token && sites.length === 0) {
+    if (session?.access_token && sites.length === 0 && !sitesLoading) {
+      setSitesLoading(true)
+      setSitesError(null)
       fetch('/api/gsc/sites')
-        .then(r => r.json())
-        .then(data => {
+        .then(async r => {
+          const data = await r.json()
+          if (!r.ok) {
+            throw new Error(data.error || `HTTP ${r.status}`)
+          }
           const list: GscSite[] = data.siteEntry || []
           setSites(list)
           if (list.length > 0) setSelectedSite(list[0].siteUrl)
+          else setSitesError('No verified properties found in this Google account.')
         })
-        .catch(() => {})
+        .catch(err => setSitesError(String(err.message || err)))
+        .finally(() => setSitesLoading(false))
     }
   }, [session])
 
@@ -640,10 +649,17 @@ export default function Home() {
                     <div className="relative max-w-sm">
                       <select value={selectedSite} onChange={e => setSelectedSite(e.target.value)} className="w-full appearance-none px-3 py-2 text-sm rounded-lg outline-none pr-8" style={{ background: 'var(--color-surface-elevated)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}>
                         {sites.map(s => <option key={s.siteUrl} value={s.siteUrl}>{s.siteUrl}</option>)}
-                        {sites.length === 0 && <option>Loading properties...</option>}
+                        {sites.length === 0 && <option>{sitesLoading ? 'Loading properties...' : sitesError ? 'Failed to load' : 'No properties'}</option>}
                       </select>
                       <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} />
                     </div>
+                    {sitesError && (
+                      <div className="mt-2 p-2 rounded-lg text-[11px]" style={{ background: '#FEE2E2', border: '1px solid #FCA5A5', color: '#991B1B' }}>
+                        <div className="font-semibold mb-1">Couldn&apos;t load GSC properties</div>
+                        <div className="font-mono break-words">{sitesError}</div>
+                        <button onClick={() => signIn('google')} className="mt-2 underline font-semibold">Sign out &amp; reconnect Google</button>
+                      </div>
+                    )}
                   </div>
                   <div>
                     <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--color-text-muted)' }}>Time Period</label>
